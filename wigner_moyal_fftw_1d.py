@@ -473,9 +473,8 @@ if __name__ == '__main__':
         # only for MacOS
         matplotlib.use('TKAgg')
 
+    import matplotlib.animation
     import matplotlib.pyplot as plt
-    from matplotlib.animation import FuncAnimation
-
 
     class VisualizeDynamicsPhaseSpace:
         """
@@ -584,17 +583,17 @@ if __name__ == '__main__':
 
     fig = plt.gcf()
     visualizer = VisualizeDynamicsPhaseSpace(fig)
-    animation = FuncAnimation(
+    animation = matplotlib.animation.FuncAnimation(
         fig, visualizer, frames=np.arange(100), init_func=visualizer.empty_frame, repeat=True, blit=True
     )
 
     plt.show()
 
     # Set up formatting for the movie files
-    #writer = matplotlib.animation.writers['mencoder'](fps=5, metadata=dict(artist='Denys Bondar'))
+    # writer = matplotlib.animation.writers['mencoder'](fps=5, metadata=dict(artist='Denys Bondar'))
 
     # Save animation into the file
-    #animation.save('harmonic_oscilator.mp4', writer=writer)
+    # animation.save('harmonic_oscilator.mp4', writer=writer)
 
     # extract the reference to quantum system
     quant_sys = visualizer.quant_sys
