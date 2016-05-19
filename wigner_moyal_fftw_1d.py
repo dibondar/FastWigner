@@ -9,6 +9,10 @@ class WignerMoyalFTTW1D:
     with the time-dependent Hamiltonian H = K(p, t) + V(x, t)
     (K and V may not depend on time.)
     This implementation stores the Wigner function as a 2D real array.
+
+    This implementation is based on the algorithm described in
+        R. Cabrera, D. I. Bondar, K. Jacobs, and H. A. Rabitz, Phys. Rev. A 92, 042122 (2015)
+        (http://dx.doi.org/10.1103/PhysRevA.92.042122)
     """
     def __init__(self, **kwargs):
         """
@@ -395,16 +399,16 @@ class WignerMoyalFTTW1D:
 
         return self.wignerfunction
 
-    def propagate(self, time_steps=1):
+    def propagate(self, steps=1):
         """
         Time propagate the Wigner function saved in self.wignerfunction
-        :param time_steps: number of self.dt time increments to make
+        :param steps: number of self.dt time increments to make
         :return: self.wignerfunction
         """
         # pre-compute the volume element in phase space
         dXdP = self.dX * self.dP
 
-        for _ in xrange(time_steps):
+        for _ in xrange(steps):
 
             # advance by one time step
             self.single_step_propagation()
