@@ -1,6 +1,7 @@
 from wigner_moyal_fftw_1d import WignerMoyalFTTW1D
 import numpy as np
 
+
 class WignerBlochFFTW1D(WignerMoyalFTTW1D):
     """
     Find the Wigner function of the Maxwell-Gibbs canonical state [rho = exp(-H/kT)]
@@ -12,7 +13,7 @@ class WignerBlochFFTW1D(WignerMoyalFTTW1D):
     """
     def __init__(self, **kwargs):
         """
-        In adition to kwagrs of WignerMoyalFTTW1D.__init__ this constructor accepts:
+        In addition to kwagrs of WignerMoyalFTTW1D.__init__ this constructor accepts:
 
         kT - the temperature for the Gibbs state [rho = exp(-H/kT)]
         dbeta (optional) -  inverse temperature increments for the split-operator propagation
@@ -49,7 +50,7 @@ class WignerBlochFFTW1D(WignerMoyalFTTW1D):
         self.dt = self.dbeta
 
         # Initialize parent class
-        WignerMoyalFTTW1D.__init__(self, **kwargs)
+        super(self.__class__, self).__init__(**kwargs)
 
         try:
             self._expV
@@ -63,13 +64,17 @@ class WignerBlochFFTW1D(WignerMoyalFTTW1D):
         #
         ##########################################################################################
 
-        self._expV = np.exp(
-            -self.dbeta * 0.5 * (self.V(self.X - 0.5 * self.Theta) + self.V(self.X + 0.5 * self.Theta))
-        )
+        self._expV = self.V(self.X - 0.5 * self.Theta) + self.V(self.X + 0.5 * self.Theta)
+        self._expV -= self._expV.max()
+        self._expV *= self.dbeta * 0.5
+        np.exp(self._expV, out=self._expV)
+        # Apply absorbing boundary
+        self._expV *= self.abs_boundary
 
-        self._expK = np.exp(
-            -self.dbeta * (self.K(self.P + 0.5 * self.Lambda) + self.K(self.P - 0.5 * self.Lambda))
-        )
+        self._expK = self.K(self.P + 0.5 * self.Lambda) + self.K(self.P - 0.5 * self.Lambda)
+        self._expK -= self._expK.max()
+        self._expK *= self.dbeta
+        np.exp(self._expK, out=self._expK)
 
     def get_gibbs_state(self):
         """
@@ -102,7 +107,7 @@ if __name__ == '__main__':
         P_amplitude=10,
 
         # Temperature of the initial state
-        kT = 1.,
+        kT=1.,
 
         # randomized parameter
         omega_square=np.random.uniform(0.5, 3),

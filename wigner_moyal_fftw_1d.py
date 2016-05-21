@@ -8,7 +8,7 @@ class WignerMoyalFTTW1D:
     The second-order split-operator propagator for the Moyal equation for the Wigner function W(x, p, t)
     with the time-dependent Hamiltonian H = K(p, t) + V(x, t)
     (K and V may not depend on time.)
-    This implementation stores the Wigner function as a 2D real array.
+    This implementation stores the Wigner function as a 2D real numpy array.
 
     This implementation is based on the algorithm described in
         R. Cabrera, D. I. Bondar, K. Jacobs, and H. A. Rabitz, Phys. Rev. A 92, 042122 (2015)
@@ -16,28 +16,35 @@ class WignerMoyalFTTW1D:
     """
     def __init__(self, **kwargs):
         """
-        The following parameters must be specified
+        The following parameters are to be specified
             X_gridDIM - the coordinate grid size
             X_amplitude - maximum value of the coordinates
             P_gridDIM - the momentum grid size
             P_amplitude - maximum value of the momentum
             V(self, x) - potential energy (as a function) may depend on time
-            diff_V(self, x) (optional) -- the derivative of the potential energy for the Ehrenfest theorem calculations
-            K(self, p) - momentum dependent part of the hamiltonian (as a function) may depend on time
-            diff_K(self, p) (optional) -- the derivative of the kinetic energy for the Ehrenfest theorem calculations
+            diff_V(self, x) (optional) - the derivative of the potential energy for the Ehrenfest theorem calculations
+            K(self, p) - the kinetic energy (as a function) may depend on time
+            diff_K(self, p) (optional) - the derivative of the kinetic energy for the Ehrenfest theorem calculations
             dt - time step
-            t (optional) - initial value of time
+            t (optional) - initial value of time (default t = 0)
 
-            alpha (optional) - the absorbing boundary smoothing parameter
+            alpha (optional) - the absorbing boundary smoothing parameter.
+                    If not specified, absorbing boundary not used.
 
             FFTW settings (for details see https://hgomersall.github.io/pyFFTW/pyfftw/pyfftw.html#pyfftw.FFTW)
             ffw_flags (optional) - a list of strings and is a subset of the flags that FFTW allows for the planners
             fftw_threads (optional) - how many threads to use when invoking FFTW, with a default of 1
-            fftw_wisdom - a tuple of strings returned by pyfftw.export_wisdom() for efficient simulations
+            fftw_wisdom (optionla) - a tuple of strings returned by pyfftw.export_wisdom() for efficient simulations
         """
+
         # save all attributes
         for name, value in kwargs.items():
-            setattr(self, name, value)
+            # if the value supplied is a function, then dynamically assign it as a method;
+            # otherwise bind it a property
+            if isinstance(value, FunctionType):
+                setattr(self, name, MethodType(value, self, self.__class__))
+            else:
+                setattr(self, name, value)
 
         # Check that all attributes were specified
         try:
@@ -65,14 +72,12 @@ class WignerMoyalFTTW1D:
             raise AttributeError("Momentum grid range (P_amplitude) was not specified")
 
         try:
-            # dynamically assign the method of calculating potential energy
-            self.V = MethodType(self.V, self, self.__class__)
+            self.V
         except AttributeError:
             raise AttributeError("Potential energy (V) was not specified")
 
         try:
-            # dynamically assign the method of calculating kinetic energy
-            self.K = MethodType(self.K, self, self.__class__)
+            self.K
         except AttributeError:
             raise AttributeError("Momentum dependence (K) was not specified")
 
@@ -138,8 +143,6 @@ class WignerMoyalFTTW1D:
 
             xmin = min(X_minus.min(), X_plus.min())
             xmax = max(X_minus.max(), X_plus.max())
-
-            self.xtheta_extent = (X_minus.min(), X_minus.max(), X_plus.min(), X_plus.max())
 
             self.abs_boundary = np.sin(np.pi * (X_plus - xmin) / (xmax - xmin))
             self.abs_boundary *= np.sin(np.pi * (X_minus - xmin) / (xmax - xmin))
@@ -220,24 +223,20 @@ class WignerMoyalFTTW1D:
 
             # Pre-calculate RHS if time independent (using similar ideas as in self.get_exp_v above)
             try:
-                self._diff_V = self.diff_V(self, self.X)
+                self._diff_V = self.diff_V(self.X)
                 self.get_diff_v = MethodType(lambda self, t: self._diff_V, self, self.__class__)
             except TypeError:
                 self.get_diff_v = MethodType(
-                    lambda self, t: self.diff_V(self, self.X, t),
-                    self,
-                    self.__class__
+                    lambda self, t: self.diff_V(self.X, t), self, self.__class__
                 )
 
             # Pre-calculate RHS if time independent (using similar ideas as in self.get_exp_v above)
             try:
-                self._diff_K = self.diff_K(self, self.P)
+                self._diff_K = self.diff_K(self.P)
                 self.get_diff_k = MethodType(lambda self, t: self._diff_K, self, self.__class__)
             except TypeError:
                 self.get_diff_k = MethodType(
-                    lambda self, t: self.diff_K(self, self.P, t),
-                    self,
-                    self.__class__
+                    lambda self, t: self.diff_K(self.P, t), self, self.__class__
                 )
 
             # Pre-calculate the potential and kinetic energies for
@@ -289,7 +288,7 @@ class WignerMoyalFTTW1D:
         # Allow to destroy data in input arrays during FFT to speed up calculations
         self.ffw_flags = self.ffw_flags + ('FFTW_DESTROY_INPUT',)
 
-        # Numer of threads used for FFTW
+        # Number of threads used for FFTW
         try:
             self.fftw_threads
         except AttributeError:
@@ -304,7 +303,7 @@ class WignerMoyalFTTW1D:
         # allocate memory for the Wigner function
         self.wignerfunction = pyfftw.empty_aligned((self.P.size, self.X.size), dtype=np.float)
 
-        # create a pointer to the wigner function in the theta x representation
+        # allocate memory for the wigner function in the theta x representation
         self.wigner_theta_x = pyfftw.empty_aligned((self.Theta.size, self.X.size), dtype=np.complex)
 
         # plan the FFT for the  p x -> theta x transform
@@ -326,7 +325,8 @@ class WignerMoyalFTTW1D:
         )
 
         # create a pointer to the wigner function in the theta x representation
-        self.wigner_p_lambda = pyfftw.empty_aligned((self.P.size, self.Lambda.size), dtype=np.complex)
+        # self.wigner_p_lambda = pyfftw.empty_aligned((self.P.size, self.Lambda.size), dtype=np.complex)
+        self.wigner_p_lambda = self.wigner_theta_x.reshape((self.P.size, self.Lambda.size))
 
         # plan the FFT for the p x  ->  p lambda transform
         self.x2lambda_transform = pyfftw.FFTW(
@@ -394,9 +394,6 @@ class WignerMoyalFTTW1D:
         self.wigner_theta_x *= expV
         self.theta2p_transform()
 
-        # increment current time
-        self.t += self.dt
-
         return self.wignerfunction
 
     def propagate(self, steps=1):
@@ -409,6 +406,8 @@ class WignerMoyalFTTW1D:
         dXdP = self.dX * self.dP
 
         for _ in xrange(steps):
+            # increment current time
+            self.t += self.dt
 
             # advance by one time step
             self.single_step_propagation()
@@ -423,11 +422,13 @@ class WignerMoyalFTTW1D:
 
     def get_Ehrenfest(self, t):
         """
-        Calculate observables entering the Ehrenfest theorems at time (t)
+        Calculate observables entering the Ehrenfest theorems at time
+        :param t: current time
+        :return: coordinate and momentum densities, if the Ehrenfest theorems were calculated; otherwise, return None
         """
         if self.isEhrenfest:
             # calculate the coordinate density
-            density_coord = self.wignerfunction.real.sum(axis=0)
+            density_coord = self.wignerfunction.sum(axis=0)
             # normalize
             density_coord /= density_coord.sum()
 
@@ -440,7 +441,7 @@ class WignerMoyalFTTW1D:
             )
 
             # calculate density in the momentum representation
-            density_momentum = self.wignerfunction.real.sum(axis=1)
+            density_momentum = self.wignerfunction.sum(axis=1)
             # normalize
             density_momentum /= density_momentum.sum()
 
@@ -454,10 +455,11 @@ class WignerMoyalFTTW1D:
 
             # save the current expectation value of energy
             self.hamiltonian_average.append(
-                np.dot(density_momentum, self.get_k(t).reshape(-1))
-                +
+                np.dot(density_momentum, self.get_k(t).reshape(-1)) +
                 np.dot(density_coord, self.get_v(t).reshape(-1))
             )
+
+            return density_coord, density_momentum
 
 ##########################################################################################
 #
@@ -570,7 +572,6 @@ if __name__ == '__main__':
             :param self:
             :return: image object
             """
-            self.set_quantum_sys()
             self.img.set_array([[]])
             return self.img,
 
