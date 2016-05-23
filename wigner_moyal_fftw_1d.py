@@ -303,8 +303,31 @@ class WignerMoyalFTTW1D:
         # allocate memory for the Wigner function
         self.wignerfunction = pyfftw.empty_aligned((self.P.size, self.X.size), dtype=np.float)
 
-        # allocate memory for the wigner function in the theta x representation
-        self.wigner_theta_x = pyfftw.empty_aligned((self.Theta.size, self.X.size), dtype=np.complex)
+        ##########################################################################################
+        #
+        # allocate memory for the wigner function in the theta x and p lambda representations
+        # by reusing the memory
+        #
+        ##########################################################################################
+
+        # find sizes of each representations
+        size_theta_x = self.Theta.size * self.X.size
+        size_p_lambda = self.P.size * self.Lambda.size
+
+        if size_theta_x > size_p_lambda:
+            # since theta x representation requires more memory, allocate it
+            self.wigner_theta_x = pyfftw.empty_aligned((self.Theta.size, self.X.size), dtype=np.complex)
+            # for p lambda representation uses a smaller subspace
+            self.wigner_p_lambda = np.frombuffer(self.wigner_theta_x, dtype=np.complex, count=size_p_lambda)
+            self.wigner_p_lambda = self.wigner_p_lambda.reshape((self.P.size, self.Lambda.size))
+        else:
+            # since  p lambda representation requires more memory, allocate it
+            self.wigner_p_lambda = pyfftw.empty_aligned((self.P.size, self.Lambda.size), dtype=np.complex)
+            # for theta x representation uses a smaller subspace
+            self.wigner_theta_x = np.frombuffer(self.wigner_p_lambda, dtype=np.complex, count=size_theta_x)
+            self.wigner_theta_x = self.wigner_theta_x.reshape((self.Theta.size, self.X.size))
+
+        ##########################################################################################
 
         # plan the FFT for the  p x -> theta x transform
         self.p2theta_transform = pyfftw.FFTW(
@@ -323,9 +346,6 @@ class WignerMoyalFTTW1D:
             flags=self.ffw_flags,
             threads=self.fftw_threads
         )
-
-        # create a pointer to the wigner function in the theta x representation
-        self.wigner_p_lambda = self.wigner_theta_x.reshape((self.P.size, self.Lambda.size))
 
         # plan the FFT for the p x  ->  p lambda transform
         self.x2lambda_transform = pyfftw.FFTW(

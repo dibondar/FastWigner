@@ -1,4 +1,5 @@
 from wigner_moyal_fftw_1d import WignerMoyalFTTW1D
+from types import MethodType
 import numpy as np
 
 
@@ -52,29 +53,51 @@ class WignerBlochFFTW1D(WignerMoyalFTTW1D):
         # Initialize parent class
         WignerMoyalFTTW1D.__init__(self, **kwargs)
 
-        try:
-            self._expV
-            self._expK
-        except AttributeError:
-            raise AttributeError("Hamiltonian must be time independent")
-
         ##########################################################################################
         #
         # Re-assign the exponents
         #
         ##########################################################################################
 
-        self._expV = self.V(self.X - 0.5 * self.Theta) + self.V(self.X + 0.5 * self.Theta)
+        # To find the Gibbs state, the Hamiltonian must be time independent.
+        # If it is not, then take the Hamiltonian at the current time self.t
+
+        try:
+            self._expV = self.V(self.X - 0.5 * self.Theta) + self.V(self.X + 0.5 * self.Theta)
+        except TypeError:
+            print(
+                "Warning: The potential energy is time dependent. " +
+                "The Gibbs state will be calculated with respect to time t = %f." % self.t
+            )
+            self._expV = self.V(self.X - 0.5 * self.Theta, self.t) + self.V(self.X + 0.5 * self.Theta, self.t)
+
         self._expV -= self._expV.min()
         self._expV *= -self.dbeta * 0.5
         np.exp(self._expV, out=self._expV)
+
         # Apply absorbing boundary
         self._expV *= self.abs_boundary
 
-        self._expK = self.K(self.P + 0.5 * self.Lambda) + self.K(self.P - 0.5 * self.Lambda)
+        # Dynamically assign the method self.get_exp_v(t) to access the cached exponential
+        self.get_exp_v = MethodType(lambda self, t: self._expV, self, self.__class__)
+
+        ##########################################################################################
+
+        try:
+            self._expK = self.K(self.P + 0.5 * self.Lambda) + self.K(self.P - 0.5 * self.Lambda)
+        except TypeError:
+            print(
+                "Warning: The kinetic energy is time dependent. " +
+                "The Gibbs state will be calculated with respect to time t = %f." % self.t
+            )
+            self._expK = self.K(self.P + 0.5 * self.Lambda, self.t) + self.K(self.P - 0.5 * self.Lambda, self.t)
+
         self._expK -= self._expK.min()
         self._expK *= -self.dbeta
         np.exp(self._expK, out=self._expK)
+
+        # Dynamically assign the method self.get_exp_k(t) to access the cached exponential
+        self.get_exp_k = MethodType(lambda self, t: self._expK, self, self.__class__)
 
     def get_gibbs_state(self):
         """
