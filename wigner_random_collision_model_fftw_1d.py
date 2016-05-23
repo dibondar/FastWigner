@@ -8,7 +8,7 @@ class WignerRandomCollisionModelFFTW1D(WignerMoyalFTTW1D):
     Second-order split operator propagator for the random collision model of open system dynamics.
     In paricular, the Wigner function obeys the following equation
 
-        dW / dt = {{H, W}} - gamma (W_0 - W)
+        dW / dt = {{H, W}} + gamma (W_0 - W)
 
     where {{ , }} is the Moyal bracket, W_0 is a Gibbs-Boltzmann state, and
     gamma characterize the collision rate (i.e., 1/gamma is dephasing time).
@@ -20,7 +20,7 @@ class WignerRandomCollisionModelFFTW1D(WignerMoyalFTTW1D):
             gamma - decay rate
         """
         # Initialize the parent class
-        super(self.__class__, self).__init__(**kwargs)
+        WignerMoyalFTTW1D.__init__(self, **kwargs)
 
         # Make sure gamma was specified
         try:
@@ -66,7 +66,7 @@ class WignerRandomCollisionModelFFTW1D(WignerMoyalFTTW1D):
         self.wignerfunction += self.scaled_gibbs_state
 
         # follow the unitary evolution
-        super(self.__class__, self).single_step_propagation()
+        WignerMoyalFTTW1D.single_step_propagation(self)
 
         # Dissipation requites to updated W as
         #   W = W0 * (1 - exp(-gamma*0.5*dt)) + exp(-gamma*0.5*dt) * W,
@@ -83,13 +83,13 @@ class WignerRandomCollisionModelFFTW1D(WignerMoyalFTTW1D):
         if self.isEhrenfest:
 
             # Calculate the Ehrenfest theorems for unitary dynamics
-            result = super(self.__class__, self).get_Ehrenfest(t)
+            result = WignerMoyalFTTW1D.get_Ehrenfest(self, t)
 
             # Amend the first Ehrenfest theorem
-            self.X_average_RHS[-1] -= self.gamma * (self.X_average_gibbs - self.X_average[-1])
+            self.X_average_RHS[-1] += self.gamma * (self.X_average_gibbs - self.X_average[-1])
 
             # Amend the second Ehrenfest theorem
-            self.P_average_RHS[-1] -= self.gamma * (self.P_average_gibbs - self.P_average[-1])
+            self.P_average_RHS[-1] += self.gamma * (self.P_average_gibbs - self.P_average[-1])
 
             return result
 
@@ -201,9 +201,9 @@ if __name__ == '__main__':
             self.quant_sys.set_wignerfunction(
                 lambda self, x, p: np.exp(
                     # randomized position
-                    -self.sigma * (x + np.random.uniform(-1., 1.)) ** 2
+                    -self.sigma * (x + np.random.uniform(-3., 3.)) ** 2
                     # randomized initial velocity
-                    - (1. / self.sigma) * (p + np.random.uniform(-1., 1.)) ** 2
+                    -(1. / self.sigma) * (p + np.random.uniform(-3., 3.)) ** 2
                 )
             )
 
@@ -269,7 +269,7 @@ if __name__ == '__main__':
     plt.plot(times, np.gradient(quant_sys.P_average, dt), 'r-', label='$d\\langle p \\rangle/dt$')
     plt.plot(
         times, quant_sys.P_average_RHS, 'b--',
-        label='$\\langle -\\partial \\partial V/\\partial x  + \\gamma p \\rangle$'
+        label='$\\langle -\\partial V/\\partial x  + \\gamma p \\rangle$'
     )
 
     plt.legend()
@@ -277,7 +277,7 @@ if __name__ == '__main__':
 
     plt.subplot(133)
     plt.title('Hamiltonian')
-    plt.plot(times, quant_sys.hamiltonian_average)
+    plt.semilogy(times, quant_sys.hamiltonian_average)
     plt.xlabel('time $t$ (a.u.)')
 
     plt.show()

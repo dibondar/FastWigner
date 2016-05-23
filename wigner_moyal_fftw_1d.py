@@ -325,7 +325,6 @@ class WignerMoyalFTTW1D:
         )
 
         # create a pointer to the wigner function in the theta x representation
-        # self.wigner_p_lambda = pyfftw.empty_aligned((self.P.size, self.Lambda.size), dtype=np.complex)
         self.wigner_p_lambda = self.wigner_theta_x.reshape((self.P.size, self.Lambda.size))
 
         # plan the FFT for the p x  ->  p lambda transform
@@ -632,7 +631,7 @@ if __name__ == '__main__':
     plt.title("The second Ehrenfest theorem verification")
 
     plt.plot(times, np.gradient(quant_sys.P_average, dt), 'r-', label='$d\\langle p \\rangle/dt$')
-    plt.plot(times, quant_sys.P_average_RHS, 'b--', label='$\\langle -\\partial \\partial V/\\partial x \\rangle$')
+    plt.plot(times, quant_sys.P_average_RHS, 'b--', label='$\\langle -\\partial V/\\partial x \\rangle$')
 
     plt.legend()
     plt.xlabel('time $t$ (a.u.)')

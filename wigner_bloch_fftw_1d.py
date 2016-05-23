@@ -50,7 +50,7 @@ class WignerBlochFFTW1D(WignerMoyalFTTW1D):
         self.dt = self.dbeta
 
         # Initialize parent class
-        super(self.__class__, self).__init__(**kwargs)
+        WignerMoyalFTTW1D.__init__(self, **kwargs)
 
         try:
             self._expV
@@ -65,15 +65,15 @@ class WignerBlochFFTW1D(WignerMoyalFTTW1D):
         ##########################################################################################
 
         self._expV = self.V(self.X - 0.5 * self.Theta) + self.V(self.X + 0.5 * self.Theta)
-        self._expV -= self._expV.max()
-        self._expV *= self.dbeta * 0.5
+        self._expV -= self._expV.min()
+        self._expV *= -self.dbeta * 0.5
         np.exp(self._expV, out=self._expV)
         # Apply absorbing boundary
         self._expV *= self.abs_boundary
 
         self._expK = self.K(self.P + 0.5 * self.Lambda) + self.K(self.P - 0.5 * self.Lambda)
-        self._expK -= self._expK.max()
-        self._expK *= self.dbeta
+        self._expK -= self._expK.min()
+        self._expK *= -self.dbeta
         np.exp(self._expK, out=self._expK)
 
     def get_gibbs_state(self):
@@ -107,10 +107,10 @@ if __name__ == '__main__':
         P_amplitude=10,
 
         # Temperature of the initial state
-        kT=1.,
+        kT=np.random.uniform(0.1, 1.),
 
         # randomized parameter
-        omega_square=np.random.uniform(0.5, 3),
+        omega=np.random.uniform(0.5, 2.),
 
         # parameter controlling the width of the initial wigner function
         sigma=np.random.uniform(0.5, 4.),
@@ -119,11 +119,16 @@ if __name__ == '__main__':
         K=lambda _, p: 0.5 * p ** 2,
 
         # potential energy part of the hamiltonian
-        V=lambda self, x: 0.5 * self.omega_square * x ** 2,
+        V=lambda self, x: 0.5 * self.omega**2 * x ** 2,
 
         # these functions are used for evaluating the Ehrenfest theorems
         diff_K=lambda _, p: p,
-        diff_V=lambda self, x: self.omega_square * x
+        diff_V=lambda self, x: self.omega**2 * x,
+
+        # Exact analytical expression for the harmonic oscillator Gibbs state
+        get_exact_gibbs=lambda self: np.tanh(0.5 * self.omega / self.kT) / np.pi * np.exp(
+            -2. * np.tanh(0.5 * self.omega / self.kT) * (self.K(self.P) + self.V(self.X)) / self.omega
+        )
     )
 
     print("Calculating the Gibbs state...")
@@ -132,6 +137,12 @@ if __name__ == '__main__':
     print("Check that the obtained Gibbs state is stationary under the Wigner-Moyal propagation...")
     propagator = WignerMoyalFTTW1D(**params)
     final_state = propagator.set_wignerfunction(gibbs_state).propagate(3000)
+
+    exact_gibbs = propagator.get_exact_gibbs()
+    print(
+        "\nIninity norm between analytical and numerical Gibbs states = %.2e ." %
+        (np.linalg.norm(exact_gibbs.reshape(-1) - gibbs_state.reshape(-1), np.inf) * propagator.dX * propagator.dP)
+    )
 
     ##########################################################################################
     #
@@ -149,7 +160,7 @@ if __name__ == '__main__':
         # make a logarithmic color plot (see, e.g., http://matplotlib.org/users/colormapnorms.html)
         norm=WignerSymLogNorm(linthresh=1e-14, vmin=-0.01, vmax=0.1)
     )
-    plt.subplot(121)
+    plt.subplot(131)
 
     plt.title("The Gibbs state (initial state)")
     plt.imshow(gibbs_state, **plot_params)
@@ -157,7 +168,15 @@ if __name__ == '__main__':
     plt.xlabel('$x$ (a.u.)')
     plt.ylabel('$p$ (a.u.)')
 
-    plt.subplot(122)
+    plt.subplot(132)
+
+    plt.title("The exact Gibbs state")
+    plt.imshow(exact_gibbs, **plot_params)
+    plt.colorbar()
+    plt.xlabel('$x$ (a.u.)')
+    plt.ylabel('$p$ (a.u.)')
+
+    plt.subplot(133)
 
     plt.title("The Gibbs state after propagation")
     plt.imshow(final_state, **plot_params)
