@@ -35,9 +35,9 @@ class WignerMoyalCUDA1D:
             diff_K (optional) - a string of the C code specifying the kinetic energy derivative w.r.t. P
                                     for the Ehrenfest theorem calculations
             dt - time step
-            ============
             alpha (optional) - the absorbing boundary smoothing parameter.
-                    If not specified, absorbing boundary not used.
+                                If not specified, absorbing boundary not used.
+            max_thread_block (optional) - the maximum number of GPU processes to be used (default 512)
         """
         # save all attributes
         for name, value in kwargs.items():
@@ -286,6 +286,59 @@ class WignerMoyalCUDA1D:
             # the Ehrenfest theorem will not be calculated
             self.isEhrenfest = False
 
+        ##########################################################################################
+        #
+        #   Define block and grid parameters for CUDA kernel
+        #
+        ##########################################################################################
+
+        #  Make sure that self.max_thread_block is defined
+        # i.e., the maximum number of GPU processes to be used (default 512)
+        try:
+            self.max_thread_block
+        except AttributeError:
+            self.max_thread_block = 512
+
+        if self.X_gridDIM <= self.max_thread_block:
+            # If the X grid size is smaller or equal to the max numer of CUDA threads
+            # then use all self.X_gridDIM processors
+            nproc = self.X_gridDIM
+        else:
+            # otherwise number of processor to be used is the greatest common divisor of these two attributes
+            from fractions import gcd
+            nproc = gcd(self.X_gridDIM, self.max_thread_block)
+
+        if nproc == 1:
+            print("Warning: Parallelization is not possible given the specified values of "
+                  "the parameters self.X_gridDIM and self.max_thread_block")
+
+        # CUDA block and grid for functions that act on the whole Wigner function
+        self.wigner_mapper_params = dict(
+            block=(nproc, 1, 1),
+            grid=(self.X_gridDIM // nproc, self.P_gridDIM)
+        )
+
+        print self.wigner_mapper_params
+
+        # CUDA block and grid for function self.expV
+        self.expV_mapper_params = dict(
+            block=(nproc, 1, 1),
+            grid=(self.X_gridDIM // nproc, self.P_gridDIM // 2 + 1)
+        )
+
+        print self.expV_mapper_params
+
+        # CUDA block and grid for function self.expK
+        self.expK_mapper_params = dict(
+            block=(self.X_gridDIM // 2 + 1, 1, 1),
+            grid=(1, self.P_gridDIM)
+        )
+
+        print self.expK_mapper_params
+
+        print '         GPU memory Total       ', pycuda.driver.mem_get_info()[1] / float(2 ** 30), 'GB'
+        print '         GPU memory Free        ', pycuda.driver.mem_get_info()[0] / float(2 ** 30), 'GB'
+
     def p2theta_transform(self):
         """
         the  p x -> theta x transform
@@ -339,7 +392,7 @@ class WignerMoyalCUDA1D:
             init_wigner = SourceModule(
                 self.init_wigner_cuda_source.format(cuda_consts=self.cuda_consts, new_wigner_func=new_wigner_func),
             ).get_function("Kernel")
-            init_wigner(self.wignerfunction, block=(self.X_gridDIM, 1, 1), grid=(1, self.P_gridDIM))
+            init_wigner(self.wignerfunction, **self.wigner_mapper_params)
 
         elif isinstance(new_wigner_func, float):
             # user specified a constant
@@ -358,15 +411,15 @@ class WignerMoyalCUDA1D:
         :return: self.wignerfunction
         """
         self.p2theta_transform()
-        self.expV(self.wigner_theta_x, self.t, block=(self.X_gridDIM, 1, 1), grid=(1, self.P_gridDIM/2 + 1))
+        self.expV(self.wigner_theta_x, self.t, **self.expV_mapper_params)
         self.theta2p_transform()
 
         self.x2lambda_transform()
-        self.expK(self.wigner_p_lambda, self.t, block=(self.X_gridDIM // 2 + 1, 1, 1), grid=(1, self.P_gridDIM))
+        self.expK(self.wigner_p_lambda, self.t, **self.expK_mapper_params)
         self.lambda2x_transform()
 
         self.p2theta_transform()
-        self.expV(self.wigner_theta_x, self.t, block=(self.X_gridDIM, 1, 1), grid=(1, self.P_gridDIM / 2 + 1))
+        self.expV(self.wigner_theta_x, self.t, **self.expV_mapper_params)
         self.theta2p_transform()
 
         return self.wignerfunction
@@ -400,10 +453,7 @@ class WignerMoyalCUDA1D:
         """
         if self.isEhrenfest:
             # save the current value of <X>
-            self.get_x(
-                self.wignerfunction, self.weighted, t,
-                block=(self.X_gridDIM, 1, 1), grid=(1, self.P_gridDIM)
-            )
+            self.get_x(self.wignerfunction, self.weighted, t, **self.wigner_mapper_params)
             self.X_average.append(
                 gpuarray.sum(self.weighted).get() * self.dXdP
             )
@@ -418,28 +468,19 @@ class WignerMoyalCUDA1D:
             )
 
             # save the current value of <P>
-            self.get_p(
-                self.wignerfunction, self.weighted, t,
-                block=(self.X_gridDIM, 1, 1), grid=(1, self.P_gridDIM)
-            )
+            self.get_p(self.wignerfunction, self.weighted, t, **self.wigner_mapper_params)
             self.P_average.append(
                 gpuarray.sum(self.weighted).get() * self.dXdP
             )
 
             # save the current value of <-diff_V>
-            self.get_diff_V(
-                self.wignerfunction, self.weighted, t,
-                block=(self.X_gridDIM, 1, 1), grid=(1, self.P_gridDIM)
-            )
+            self.get_diff_V(self.wignerfunction, self.weighted, t, **self.wigner_mapper_params)
             self.P_average_RHS.append(
                 -gpuarray.sum(self.weighted).get() * self.dXdP
             )
 
             # save the current expectation value of energy
-            self.get_hamiltonian(
-                self.wignerfunction, self.weighted, t,
-                block=(self.X_gridDIM, 1, 1), grid=(1, self.P_gridDIM)
-            )
+            self.get_hamiltonian(self.wignerfunction, self.weighted, t, **self.wigner_mapper_params)
             self.hamiltonian_average.append(
                 gpuarray.sum(self.weighted).get() * self.dXdP
             )
@@ -640,7 +681,8 @@ if __name__ == '__main__':
             self.quant_sys = WignerMoyalCUDA1D(
                 t=0.,
                 dt=0.01,
-                X_gridDIM=512,
+                max_thread_block=512,
+                X_gridDIM=1024,
                 X_amplitude=10.,
                 P_gridDIM=512,
                 P_amplitude=10.,
