@@ -323,14 +323,14 @@ class WignerMoyalCUDA1D:
         # CUDA block and grid for function self.expV
         self.expV_mapper_params = dict(
             block=(nproc, 1, 1),
-            grid=(self.X_gridDIM // nproc, self.P_gridDIM // 2 + 1)
+            grid=(self.X_gridDIM // nproc, self.P_gridDIM // 2)
         )
 
         print self.expV_mapper_params
 
         # CUDA block and grid for function self.expK
         self.expK_mapper_params = dict(
-            block=(self.X_gridDIM // 2 + 1, 1, 1),
+            block=(self.X_gridDIM // 2, 1, 1),
             grid=(1, self.P_gridDIM)
         )
 
@@ -459,10 +459,7 @@ class WignerMoyalCUDA1D:
             )
 
             # save the current value of <diff_K>
-            self.get_diff_K(
-                self.wignerfunction, self.weighted, t,
-                block=(self.X_gridDIM, 1, 1), grid=(1, self.P_gridDIM)
-            )
+            self.get_diff_K(self.wignerfunction, self.weighted, t, **self.wigner_mapper_params)
             self.X_average_RHS.append(
                 gpuarray.sum(self.weighted).get() * self.dXdP
             )
@@ -505,9 +502,9 @@ class WignerMoyalCUDA1D:
 
     __global__ void Kernel(cuda_complex *Z, double t)
     {{
-        const size_t j = threadIdx.x;
         const size_t i = blockIdx.y;
-        const size_t indexTotal = j + i * blockDim.x;
+        const size_t j = threadIdx.x + blockDim.x*blockIdx.x;
+        const size_t indexTotal = threadIdx.x + blockDim.x * blockIdx.x  + blockIdx.y * blockDim.x * gridDim.x;
 
         const double Lambda = dLambda*j;
         const double P = dP * (i - 0.5 * P_gridDIM);
@@ -546,9 +543,9 @@ class WignerMoyalCUDA1D:
 
     __global__ void Kernel(cuda_complex *Z, double t)
     {{
-        const size_t j = threadIdx.x;
         const size_t i = blockIdx.y;
-        const size_t indexTotal = j + i * blockDim.x;
+        const size_t j = threadIdx.x + blockDim.x*blockIdx.x;
+        const size_t indexTotal = threadIdx.x + blockDim.x * blockIdx.x  + blockIdx.y * blockDim.x * gridDim.x;
 
         const double X = dX * (j - 0.5 * X_gridDIM);
         const double Theta = dTheta*i;
@@ -573,9 +570,9 @@ class WignerMoyalCUDA1D:
 
     __global__ void Kernel(double *W)
     {{
-        const size_t j = threadIdx.x;
         const size_t i = blockIdx.y;
-        const size_t indexTotal = j + i * blockDim.x;
+        const size_t j = threadIdx.x + blockDim.x*blockIdx.x;
+        const size_t indexTotal = threadIdx.x + blockDim.x * blockIdx.x  + blockIdx.y * blockDim.x * gridDim.x;
 
         const double X = dX * (j - 0.5 * X_gridDIM);
         const double P = dP * (i - 0.5 * P_gridDIM);
@@ -597,9 +594,9 @@ class WignerMoyalCUDA1D:
 
     __global__ void Kernel(const double *W, double *weighted, double t)
     {{
-        const size_t j = threadIdx.x;
         const size_t i = blockIdx.y;
-        const size_t indexTotal = j + i * blockDim.x;
+        const size_t j = threadIdx.x + blockDim.x*blockIdx.x;
+        const size_t indexTotal = threadIdx.x + blockDim.x * blockIdx.x  + blockIdx.y * blockDim.x * gridDim.x;
 
         const double X = dX * (j - 0.5 * X_gridDIM);
         const double P = dP * (i - 0.5 * P_gridDIM);
