@@ -3,6 +3,7 @@ import pycuda.driver as cuda
 import pycuda.autoinit
 from pycuda.compiler import SourceModule
 import numpy as np
+from fractions import gcd
 from types import MethodType, FunctionType
 import cufft
 
@@ -299,14 +300,11 @@ class WignerMoyalCUDA1D:
         except AttributeError:
             self.max_thread_block = 512
 
-        if self.X_gridDIM <= self.max_thread_block:
-            # If the X grid size is smaller or equal to the max numer of CUDA threads
-            # then use all self.X_gridDIM processors
-            nproc = self.X_gridDIM
-        else:
-            # otherwise number of processor to be used is the greatest common divisor of these two attributes
-            from fractions import gcd
-            nproc = gcd(self.X_gridDIM, self.max_thread_block)
+        # If the X grid size is smaller or equal to the max number of CUDA threads
+        # then use all self.X_gridDIM processors
+        # otherwise number of processor to be used is the greatest common divisor of these two attributes
+        size_x = self.X_gridDIM
+        nproc = (size_x if size_x <= self.max_thread_block else gcd(size_x, self.max_thread_block))
 
         if nproc == 1:
             print("Warning: Parallelization is not possible given the specified values of "
@@ -315,29 +313,32 @@ class WignerMoyalCUDA1D:
         # CUDA block and grid for functions that act on the whole Wigner function
         self.wigner_mapper_params = dict(
             block=(nproc, 1, 1),
-            grid=(self.X_gridDIM // nproc, self.P_gridDIM)
+            grid=(size_x // nproc, self.P_gridDIM)
         )
-
-        print self.wigner_mapper_params
 
         # CUDA block and grid for function self.expV
         self.expV_mapper_params = dict(
             block=(nproc, 1, 1),
-            grid=(self.X_gridDIM // nproc, self.P_gridDIM // 2)
+            grid=(size_x // nproc, self.P_gridDIM // 2)
         )
-
-        print self.expV_mapper_params
 
         # CUDA block and grid for function self.expK
+        size_x = self.X_gridDIM  // 2
+        nproc = (size_x if size_x <= self.max_thread_block else gcd(size_x, self.max_thread_block))
+
         self.expK_mapper_params = dict(
-            block=(self.X_gridDIM // 2, 1, 1),
-            grid=(1, self.P_gridDIM)
+            block=(nproc, 1, 1),
+            grid=(size_x // nproc, self.P_gridDIM)
         )
 
-        print self.expK_mapper_params
+        if nproc == 1:
+            print("Warning: Parallelization is not possible given the specified values of "
+                  "the parameters self.X_gridDIM and self.max_thread_block")
 
-        print '         GPU memory Total       ', pycuda.driver.mem_get_info()[1] / float(2 ** 30), 'GB'
-        print '         GPU memory Free        ', pycuda.driver.mem_get_info()[0] / float(2 ** 30), 'GB'
+        print(
+            "\n\n\t\tGPU memory Total %.2f GB\n\t\tGPU memory Free %.2f GB\n" % \
+            tuple(np.array(pycuda.driver.mem_get_info()) / 2. ** 30)
+        )
 
     def p2theta_transform(self):
         """
@@ -504,7 +505,8 @@ class WignerMoyalCUDA1D:
     {{
         const size_t i = blockIdx.y;
         const size_t j = threadIdx.x + blockDim.x*blockIdx.x;
-        const size_t indexTotal = threadIdx.x + blockDim.x * blockIdx.x  + blockIdx.y * blockDim.x * gridDim.x;
+        const size_t indexTotal = threadIdx.x +
+            blockDim.x * blockIdx.x  + blockIdx.y * (blockDim.x + 1) * gridDim.x;
 
         const double Lambda = dLambda*j;
         const double P = dP * (i - 0.5 * P_gridDIM);
@@ -678,7 +680,6 @@ if __name__ == '__main__':
             self.quant_sys = WignerMoyalCUDA1D(
                 t=0.,
                 dt=0.01,
-                max_thread_block=512,
                 X_gridDIM=1024,
                 X_amplitude=10.,
                 P_gridDIM=512,
@@ -727,7 +728,7 @@ if __name__ == '__main__':
             :return: image objects
             """
             # propagate the wigner function
-            self.img.set_array(self.quant_sys.propagate(20).get())
+            self.img.set_array(self.quant_sys.propagate(50).get())
             return self.img,
 
 
