@@ -364,6 +364,7 @@ class WignerMoyalCUDA1D:
         the theta x -> p x  transform
         """
         cufft.cu_ifft_Z2D(self.wigner_theta_x, self.wignerfunction, self.plan_Z2D_Axes0)
+        self.wignerfunction /= float(self.wignerfunction.shape[0])
 
     def x2lambda_transform(self):
         """
@@ -376,6 +377,7 @@ class WignerMoyalCUDA1D:
         the p lambda  ->  p x transform
         """
         cufft.cu_ifft_Z2D(self.wigner_p_lambda, self.wignerfunction, self.plan_Z2D_Axes1)
+        self.wignerfunction /= float(self.wignerfunction.shape[1])
 
     def set_wignerfunction(self, new_wigner_func):
         """
@@ -410,7 +412,7 @@ class WignerMoyalCUDA1D:
 
         elif isinstance(new_wigner_func, float):
             # user specified a constant
-            self.wignerfunction.fill(new_wigner_func)
+            self.wignerfunction.fill(np.float64(new_wigner_func))
         else:
             raise NotImplementedError("new_wigner_func must be either function or numpy.array")
 

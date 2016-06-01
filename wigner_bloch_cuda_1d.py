@@ -6,7 +6,7 @@ from pycuda.compiler import SourceModule
 import numpy as np
 
 
-class WignerBlochFFTW1D(WignerMoyalCUDA1D):
+class WignerBlochCUDA1D(WignerMoyalCUDA1D):
     """
     Find the Wigner function of the Maxwell-Gibbs canonical state [rho = exp(-H/kT)]
     by second-order split-operator propagation of the Bloch equation in phase space using CUDA.
@@ -67,7 +67,7 @@ class WignerBlochFFTW1D(WignerMoyalCUDA1D):
         Return the potential energy minimum in the x theta space
         """
         # allocate memory
-        v_theta_x = gpuarray.GPUArray((self.Theta.size, self.X.size), np.float64)
+        v_theta_x = gpuarray.zeros((self.Theta.size, self.X.size), np.float64)
 
         fill_V = SourceModule(
             self.fill_extended_V.format(cuda_consts=self.cuda_consts, V=self.V),
@@ -83,7 +83,7 @@ class WignerBlochFFTW1D(WignerMoyalCUDA1D):
         Return the kinetic energy minimum in the lambda p space
         """
         # allocate memory
-        k_p_lambda = gpuarray.GPUArray((self.P.size, self.Lambda.size), np.float64)
+        k_p_lambda = gpuarray.zeros((self.P.size, self.Lambda.size), np.float64)
 
         fill_K = SourceModule(
             self.fill_extended_K.format(cuda_consts=self.cuda_consts, K=self.K),
@@ -100,7 +100,7 @@ class WignerBlochFFTW1D(WignerMoyalCUDA1D):
         :return: GPUArray with Boltzmann-Gibbs state
         """
         # Set the initial state and propagate
-        self.set_wignerfunction(1.)
+        self.set_wignerfunction(1. / np.prod(self.wignerfunction.shape))
         return self.propagate(self.num_beta_steps)
 
     expK_cuda_source = """
@@ -267,7 +267,7 @@ class WignerBlochFFTW1D(WignerMoyalCUDA1D):
 
 if __name__ == '__main__':
 
-    print(WignerBlochFFTW1D.__doc__)
+    print(WignerBlochCUDA1D.__doc__)
 
     import matplotlib.pyplot as plt
 
@@ -302,7 +302,7 @@ if __name__ == '__main__':
     )
 
     print("Calculating the Gibbs state...")
-    gibbs_state = WignerBlochFFTW1D(**params).get_gibbs_state()
+    gibbs_state = WignerBlochCUDA1D(**params).get_gibbs_state()
 
     print("Check that the obtained Gibbs state is stationary under the Wigner-Moyal propagation...")
     propagator = WignerMoyalCUDA1D(**params)
