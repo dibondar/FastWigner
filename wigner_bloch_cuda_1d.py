@@ -1,7 +1,6 @@
 from wigner_moyal_cuda_1d import WignerMoyalCUDA1D
 
 import pycuda.gpuarray as gpuarray
-import pycuda.autoinit
 from pycuda.compiler import SourceModule
 import numpy as np
 

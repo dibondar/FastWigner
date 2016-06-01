@@ -1,7 +1,7 @@
 __doc__ = "This file is an example how to use FFTW implementations of phase space dynamics to study" \
           "strong field physics (ionization due to fs laser pulese)"
 
-from wigner_moyal_cuda_1d import WignerMoyalCUDA1D
+from wigner_bloch_cuda_1d import WignerMoyalCUDA1D, WignerBlochCUDA1D
 import numpy as np
 
 # load tools for creating animation
@@ -25,13 +25,17 @@ sys_params = dict(
     dt=0.01,
 
     X_gridDIM=1024,
-    X_amplitude=30.,
+    X_amplitude=120.,
 
-    P_gridDIM=256,
-    P_amplitude=10,
+    P_gridDIM=1024,
+    P_amplitude=6.,
+
+    # Absorbing boundary
+    alpha=0.02,
 
     # Temperature in atomic units
     kT=0.05,
+    dbeta=0.002,
 
     # Decay constant in the random collision model
     _gamma=0.01,
@@ -104,16 +108,17 @@ class VisualizeDynamicsPhaseSpace:
         extent = [self.quant_sys.X.min(), self.quant_sys.X.max(), self.quant_sys.P.min(), self.quant_sys.P.max()]
 
         # import utility to visualize the wigner function
-        from wigner_normalize import WignerNormalize
+        from wigner_normalize import WignerNormalize, WignerSymLogNorm
 
         # generate empty plot
         self.img = ax.imshow(
             [[]],
             extent=extent,
             origin='lower',
-            aspect=2,
+            aspect=5,
             cmap='seismic',
-            norm=WignerNormalize(vmin=-0.01, vmax=0.1)
+            norm=WignerSymLogNorm(linthresh=1e-7, vmin=-0.01, vmax=0.1),
+            #norm=WignerNormalize(vmin=-0.01, vmax=0.1)
         )
 
         self.fig.colorbar(self.img)
@@ -139,10 +144,10 @@ class VisualizeDynamicsPhaseSpace:
         # List to save times
         self.times = [self.quant_sys.t]
 
-        # set randomised initial condition
-        #self.quant_sys.set_wignerfunction(self.quant_sys.scaled_gibbs_state)
-
-        self.quant_sys.set_wignerfunction("exp(-X * X - P * P)")
+        # set the Gibbs state as initial condition
+        self.quant_sys.set_wignerfunction(
+            WignerBlochCUDA1D(**self.sys_params).get_gibbs_state()
+        )
 
     def empty_frame(self):
         """
@@ -161,7 +166,7 @@ class VisualizeDynamicsPhaseSpace:
         :return: image objects
         """
         # propagate the wigner function
-        self.img.set_array(self.quant_sys.propagate(20).get())
+        self.img.set_array(self.quant_sys.propagate(1000)[::2, ::2].get())
 
         self.times.append(self.quant_sys.t)
 
