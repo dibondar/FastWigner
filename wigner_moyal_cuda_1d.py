@@ -1,5 +1,4 @@
 import pycuda.gpuarray as gpuarray
-import pycuda.driver as cuda
 import pycuda.autoinit
 from pycuda.compiler import SourceModule
 import numpy as np
@@ -157,7 +156,7 @@ class WignerMoyalCUDA1D:
         except AttributeError:
             # if the absorbing boundary smoothing parameter was not specified
             # then we should not use the absorbing boundary
-            self.abs_boundary = "1"
+            self.abs_boundary = "1."
 
         ##########################################################################################
         #
@@ -187,6 +186,67 @@ class WignerMoyalCUDA1D:
             self.cuda_consts += self.functions
         except AttributeError:
             pass
+
+        ##########################################################################################
+        #
+        #   Define block and grid parameters for CUDA kernel
+        #
+        ##########################################################################################
+
+        #  Make sure that self.max_thread_block is defined
+        # i.e., the maximum number of GPU processes to be used (default 512)
+        try:
+            self.max_thread_block
+        except AttributeError:
+            self.max_thread_block = 512
+
+        # If the X grid size is smaller or equal to the max number of CUDA threads
+        # then use all self.X_gridDIM processors
+        # otherwise number of processor to be used is the greatest common divisor of these two attributes
+        size_x = self.X_gridDIM
+        nproc = (size_x if size_x <= self.max_thread_block else gcd(size_x, self.max_thread_block))
+
+        if nproc == 1:
+            print("Warning: Parallelization is not possible given the specified values of "
+                  "the parameters self.X_gridDIM and self.max_thread_block")
+
+        # CUDA block and grid for functions that act on the whole Wigner function
+        self.wigner_mapper_params = dict(
+            block=(nproc, 1, 1),
+            grid=(size_x // nproc, self.P_gridDIM)
+        )
+
+        # CUDA block and grid for function self.expV
+        self.expV_mapper_params = dict(
+            block=(nproc, 1, 1),
+            grid=(size_x // nproc, self.P_gridDIM // 2)
+        )
+
+        # CUDA block and grid for function self.expK
+        size_x = self.X_gridDIM  // 2
+        nproc = (size_x if size_x <= self.max_thread_block else gcd(size_x, self.max_thread_block))
+
+        self.expK_mapper_params = dict(
+            block=(nproc, 1, 1),
+            grid=(size_x // nproc, self.P_gridDIM)
+        )
+
+        if nproc == 1:
+            print("Warning: Parallelization is not possible given the specified values of "
+                  "the parameters self.X_gridDIM and self.max_thread_block")
+
+        ##########################################################################################
+        #
+        # If the Gibbs state is calculated  then
+        # save the minimums of the potential (V) and kinetic (K) energy into self.cuda_consts
+        #
+        ##########################################################################################
+
+        if 'V_min' in self.expV_cuda_source:
+            self.cuda_consts += "    const double V_min = %.15e;\n" % self.get_V_min()
+
+        if 'K_min' in self.expK_cuda_source:
+            self.cuda_consts += "    const double K_min = %.15e;\n" % self.get_K_min()
 
         ##########################################################################################
         #
@@ -287,54 +347,7 @@ class WignerMoyalCUDA1D:
             # the Ehrenfest theorem will not be calculated
             self.isEhrenfest = False
 
-        ##########################################################################################
-        #
-        #   Define block and grid parameters for CUDA kernel
-        #
-        ##########################################################################################
-
-        #  Make sure that self.max_thread_block is defined
-        # i.e., the maximum number of GPU processes to be used (default 512)
-        try:
-            self.max_thread_block
-        except AttributeError:
-            self.max_thread_block = 512
-
-        # If the X grid size is smaller or equal to the max number of CUDA threads
-        # then use all self.X_gridDIM processors
-        # otherwise number of processor to be used is the greatest common divisor of these two attributes
-        size_x = self.X_gridDIM
-        nproc = (size_x if size_x <= self.max_thread_block else gcd(size_x, self.max_thread_block))
-
-        if nproc == 1:
-            print("Warning: Parallelization is not possible given the specified values of "
-                  "the parameters self.X_gridDIM and self.max_thread_block")
-
-        # CUDA block and grid for functions that act on the whole Wigner function
-        self.wigner_mapper_params = dict(
-            block=(nproc, 1, 1),
-            grid=(size_x // nproc, self.P_gridDIM)
-        )
-
-        # CUDA block and grid for function self.expV
-        self.expV_mapper_params = dict(
-            block=(nproc, 1, 1),
-            grid=(size_x // nproc, self.P_gridDIM // 2)
-        )
-
-        # CUDA block and grid for function self.expK
-        size_x = self.X_gridDIM  // 2
-        nproc = (size_x if size_x <= self.max_thread_block else gcd(size_x, self.max_thread_block))
-
-        self.expK_mapper_params = dict(
-            block=(nproc, 1, 1),
-            grid=(size_x // nproc, self.P_gridDIM)
-        )
-
-        if nproc == 1:
-            print("Warning: Parallelization is not possible given the specified values of "
-                  "the parameters self.X_gridDIM and self.max_thread_block")
-
+        # print memory info
         print(
             "\n\n\t\tGPU memory Total %.2f GB\n\t\tGPU memory Free %.2f GB\n" % \
             tuple(np.array(pycuda.driver.mem_get_info()) / 2. ** 30)
@@ -397,7 +410,7 @@ class WignerMoyalCUDA1D:
 
         elif isinstance(new_wigner_func, float):
             # user specified a constant
-            self.wignerfunction[:] = new_wigner_func
+            self.wignerfunction.fill(new_wigner_func)
         else:
             raise NotImplementedError("new_wigner_func must be either function or numpy.array")
 

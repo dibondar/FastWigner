@@ -26,8 +26,8 @@ class WignerBlochFFTW1D(WignerMoyalFTTW1D):
 
         if self.kT > 0:
             try:
-                self.dbeta
-            except AttributeError:
+                self.dbeta = kwargs['dbeta']
+            except KeyError:
                 # if dbeta is not defined, just choose some value
                 self.dbeta = 0.01
 
@@ -40,18 +40,18 @@ class WignerBlochFFTW1D(WignerMoyalFTTW1D):
                 self.dbeta = 1. / (self.kT*self.num_beta_steps)
 
             self.num_beta_steps = int(self.num_beta_steps)
+
         else:
             raise NotImplemented("The calculation of the ground state Wigner function has not been implemented")
 
-        # dbeta takes the form of dt
-        try:
-            del kwargs['dt']
-        except KeyError:
-            pass
-        self.dt = self.dbeta
+        # Save the inverse temperature increment also dbeta takes the form of dt
+        kwargs.update(dbeta=self.dbeta, dt=self.dbeta)
 
         # Initialize parent class
         WignerMoyalFTTW1D.__init__(self, **kwargs)
+
+        # Make sure the Ehrenfest theorems are not calculated
+        self.isEhrenfest = False
 
         ##########################################################################################
         #
