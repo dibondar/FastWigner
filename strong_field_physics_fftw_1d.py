@@ -36,20 +36,22 @@ sys_params = dict(
     t=0.,
     dt=0.01,
 
-    X_gridDIM=1024,
-    X_amplitude=30.,
+    X_gridDIM=512,
 
-    P_gridDIM=256,
+    # the lattice constant
+    X_amplitude=8.,
+
+    # Lattice height
+    V0=0.37,
+
+    P_gridDIM=512,
     P_amplitude=10,
 
-    # Temperature in atomic units
-    kT=0.05,
+    # Temperature
+    kT=0.03,
 
     # Decay constant in the random collision model
     gamma=0.01,
-
-    # parameter controling smoothness of the absorbing boundary, if the latter is used
-    #alpha=0.02,
 
     # frequency of laser field (800nm)
     omega=0.05698,
@@ -57,22 +59,26 @@ sys_params = dict(
     # field strength
     F=0.04,
 
-    # Laser field (the field will be on for 8 periods of laser field)
-    E=lambda self, t: self.F * np.sin(self.omega * t) * np.sin(self.omega * t / 16.)**2,
+    # The vector potential of laser field (the field will be on for 8 periods of laser field)
+    A=lambda self, t: -self.F/self.omega * np.sin(self.omega * t) * np.sin(self.omega * t / 16.)**2,
 
     ##########################################################################################
     #
-    # Specify system's hamiltonian|
+    # Specify system's hamiltonian
     #
     ##########################################################################################
-    K=lambda _, p: 0.5*p**2,
-    diff_K=lambda _, p: p,
 
-    # the soft core Coulomb potential (Agron single active electron picture)
-    V=lambda self, x, t: -1. / np.sqrt(x**2 + 1.37) + x * self.E(t),
+    # the kinetic energy
+    K=lambda self, p, t: 0.5*(p + self.A(t))**2,
+
+    # derivative of the kinetic energy to calculate Ehrenfest
+    diff_K=lambda self, p, t: (p + self.A(t)),
+
+    # Mathieu-type periodic system
+    V=lambda self, x: -self.V0 * (1 + np.cos(2*np.pi*x/self.X_amplitude)),
 
     # the derivative of the potential to calculate Ehrenfest
-    diff_V=lambda self, x, t: x * np.power(x**2 + 1.37, -1.5) + self.E(t),
+    diff_V=lambda self, x: self.V0 * 2*np.pi/self.X_amplitude * np.sin(2*np.pi*x/self.X_amplitude),
 
     ##########################################################################################
     #
@@ -115,16 +121,17 @@ class VisualizeDynamicsPhaseSpace:
         extent = [self.quant_sys.X.min(), self.quant_sys.X.max(), self.quant_sys.P.min(), self.quant_sys.P.max()]
 
         # import utility to visualize the wigner function
-        from wigner_normalize import WignerNormalize
+        from wigner_normalize import WignerNormalize, WignerSymLogNorm
 
         # generate empty plot
         self.img = ax.imshow(
             [[]],
             extent=extent,
             origin='lower',
-            aspect=2,
+            aspect=1,
             cmap='seismic',
-            norm=WignerNormalize(vmin=-0.01, vmax=0.1)
+            norm=WignerSymLogNorm(linthresh=1e-10, vmin=-0.2, vmax=0.2),
+            #norm=WignerNormalize(vmin=-0.01, vmax=1.)
         )
 
         self.fig.colorbar(self.img)
@@ -133,9 +140,10 @@ class VisualizeDynamicsPhaseSpace:
         ax.set_ylabel('$p$ (a.u.)')
 
         ax = fig.add_subplot(212)
-        self.laser_filed_plot, = ax.plot([0., 8*2*np.pi/self.quant_sys.omega], [-self.quant_sys.F, self.quant_sys.F])
+        A0 = self.quant_sys.F/self.quant_sys.omega
+        self.laser_filed_plot, = ax.plot([0., 8*2*np.pi/self.quant_sys.omega], [-A0, A0])
         ax.set_xlabel('time (a.u.)')
-        ax.set_ylabel('Laser field (a.u.)')
+        ax.set_ylabel('Vector potential $A(t)$ (a.u.)')
 
     def set_quantum_sys(self):
         """
@@ -144,13 +152,18 @@ class VisualizeDynamicsPhaseSpace:
         :return:
         """
         # Create propagator
-        self.quant_sys = WignerRandomCollisionModelFFTW1D(**self.sys_params)
+        #self.quant_sys = WignerRandomCollisionModelFFTW1D(**self.sys_params)
+        self.quant_sys = WignerMoyalFTTW1D(**self.sys_params)
+
 
         # List to save times
         self.times = [self.quant_sys.t]
 
         # set randomised initial condition
-        self.quant_sys.set_wignerfunction(self.quant_sys.scaled_gibbs_state)
+        #self.quant_sys.set_wignerfunction(self.quant_sys.scaled_gibbs_state)
+        self.quant_sys.set_wignerfunction(
+            WignerBlochFFTW1D(**self.sys_params).get_gibbs_state()
+        )
 
     def empty_frame(self):
         """
@@ -169,12 +182,12 @@ class VisualizeDynamicsPhaseSpace:
         :return: image objects
         """
         # propagate the wigner function
-        self.img.set_array(self.quant_sys.propagate(20))
+        self.img.set_array(self.quant_sys.propagate(100))
 
         self.times.append(self.quant_sys.t)
 
         t = np.array(self.times)
-        self.laser_filed_plot.set_data(t, self.quant_sys.E(t))
+        self.laser_filed_plot.set_data(t, self.quant_sys.A(t))
 
         return self.img, self.laser_filed_plot
 

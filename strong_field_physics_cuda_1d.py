@@ -24,24 +24,22 @@ sys_params = dict(
     t=0.,
     dt=0.01,
 
-    X_gridDIM=1024,
-    X_amplitude=120.,
+    X_gridDIM=512,
 
-    P_gridDIM=1024,
-    P_amplitude=6.,
+    # the lattice constant
+    X_amplitude=8.,
 
-    # Absorbing boundary
-    alpha=0.02,
+    # Lattice height
+    V0=0.37,
+
+    P_gridDIM=512,
+    P_amplitude=10.,
 
     # Temperature in atomic units
-    kT=0.05,
-    dbeta=0.002,
+    kT=0.03,
 
     # Decay constant in the random collision model
     _gamma=0.01,
-
-    # parameter controling smoothness of the absorbing boundary, if the latter is used
-    # alpha=0.02,
 
     # frequency of laser field (800nm)
     omega=0.05698,
@@ -50,29 +48,34 @@ sys_params = dict(
     F=0.04,
 
     functions="""
-    // Laser field (the field will be on for 8 periods of laser field)
-    __device__ double E(double t)
+    // # The vector potential of laser field (the field will be on for 8 periods of laser field)
+    __device__ double A(double t)
     {{
-        return F * sin(omega * t) * pow(sin(omega * t / 16.), 2);
+        return -F / omega * sin(omega * t) * pow(sin(omega * t / 16.), 2);
     }}
     """,
 
     # The same as C code
-    E=lambda self, t: self.F * np.sin(self.omega * t) * np.sin(self.omega * t / 16.)**2,
+    A=lambda self, t: -self.F/self.omega * np.sin(self.omega * t) * np.sin(self.omega * t / 16.)**2,
+
 
     ##########################################################################################
     #
-    # Specify system's hamiltonian|
+    # Specify system's hamiltonian
     #
     ##########################################################################################
-    K="0.5 * P * P",
-    diff_K="P",
 
-    # the soft core Coulomb potential (Agron single active electron picture)
-    V="-1. / sqrt(X * X + 1.37) + X * E(t)",
+    # the kinetic energy
+    K="0.5 * pow(P + A(t), 2)",
+
+    # derivative of the kinetic energy to calculate Ehrenfest
+    diff_K="P + A(t)",
+
+    # Mathieu-type periodic system
+    V = "-V0 * (1. + cos(2. * M_PI * X / X_amplitude))",
 
     # the derivative of the potential to calculate Ehrenfest
-    diff_V="X * pow(X * X + 1.37, -1.5) + E(t)",
+    diff_V="V0 * 2. * M_PI / X_amplitude * sin(2. * M_PI * X / X_amplitude)",
 )
 
 
@@ -115,9 +118,9 @@ class VisualizeDynamicsPhaseSpace:
             [[]],
             extent=extent,
             origin='lower',
-            aspect=5,
+            aspect=1,
             cmap='seismic',
-            norm=WignerSymLogNorm(linthresh=1e-7, vmin=-0.01, vmax=0.1),
+            norm=WignerSymLogNorm(linthresh=1e-10, vmin=-0.2, vmax=0.2),
             #norm=WignerNormalize(vmin=-0.01, vmax=0.1)
         )
 
@@ -127,10 +130,10 @@ class VisualizeDynamicsPhaseSpace:
         ax.set_ylabel('$p$ (a.u.)')
 
         ax = fig.add_subplot(212)
-        self.laser_filed_plot, = ax.plot([0., 8 * 2 * np.pi / self.quant_sys.omega],
-                                         [-self.quant_sys.F, self.quant_sys.F])
+        A0 = self.quant_sys.F/self.quant_sys.omega
+        self.laser_filed_plot, = ax.plot([0., 8*2*np.pi/self.quant_sys.omega], [-A0, A0])
         ax.set_xlabel('time (a.u.)')
-        ax.set_ylabel('Laser field (a.u.)')
+        ax.set_ylabel('Vector potential $A(t)$ (a.u.)')
 
     def set_quantum_sys(self):
         """
@@ -166,12 +169,12 @@ class VisualizeDynamicsPhaseSpace:
         :return: image objects
         """
         # propagate the wigner function
-        self.img.set_array(self.quant_sys.propagate(1000)[::2, ::2].get())
+        self.img.set_array(self.quant_sys.propagate(200).get())
 
         self.times.append(self.quant_sys.t)
 
         t = np.array(self.times)
-        self.laser_filed_plot.set_data(t, self.quant_sys.E(t))
+        self.laser_filed_plot.set_data(t, self.quant_sys.A(t))
 
         return self.img, self.laser_filed_plot
 

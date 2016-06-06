@@ -347,7 +347,14 @@ class WignerMoyalCUDA1D:
             # the Ehrenfest theorem will not be calculated
             self.isEhrenfest = False
 
-        # print memory info
+        self.print_memory_info()
+
+    @classmethod
+    def print_memory_info(cls):
+        """
+        Print the CUDA memory info
+        :return:
+        """
         print(
             "\n\n\t\tGPU memory Total %.2f GB\n\t\tGPU memory Free %.2f GB\n" % \
             tuple(np.array(pycuda.driver.mem_get_info()) / 2. ** 30)
