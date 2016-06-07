@@ -26,14 +26,14 @@ sys_params = dict(
 
     X_gridDIM=512,
 
-    # the lattice constant
-    X_amplitude=8.,
+    # the lattice constant is 2 * X_amplitude
+    X_amplitude=4.,
 
     # Lattice height
     V0=0.37,
 
-    P_gridDIM=512,
-    P_amplitude=10.,
+    P_gridDIM=1024,
+    P_amplitude=15.,
 
     # Temperature in atomic units
     kT=0.03,
@@ -45,7 +45,7 @@ sys_params = dict(
     omega=0.05698,
 
     # field strength
-    F=0.04,
+    F=0, #0.06,
 
     functions="""
     // # The vector potential of laser field (the field will be on for 8 periods of laser field)
@@ -55,9 +55,12 @@ sys_params = dict(
     }}
     """,
 
+    abs_boundary_x_theta="exp(-dt * 0.0001 * Theta * Theta)",
+    #abs_boundary_lambda_p="exp(-dt * 0.05 * Lambda * Lambda)",
+    #abs_boundary_x_p="pow(abs(sin(0.5 * M_PI * (P + P_amplitude) / P_amplitude)), 2*dt*0.03)",
+
     # The same as C code
     A=lambda self, t: -self.F/self.omega * np.sin(self.omega * t) * np.sin(self.omega * t / 16.)**2,
-
 
     ##########################################################################################
     #
@@ -72,10 +75,10 @@ sys_params = dict(
     diff_K="P + A(t)",
 
     # Mathieu-type periodic system
-    V = "-V0 * (1. + cos(2. * M_PI * X / X_amplitude))",
+    V = "-V0 * (1. + cos(M_PI * (X + X_amplitude) / X_amplitude))",
 
     # the derivative of the potential to calculate Ehrenfest
-    diff_V="V0 * 2. * M_PI / X_amplitude * sin(2. * M_PI * X / X_amplitude)",
+    diff_V="V0 * M_PI / X_amplitude * sin(M_PI * (X + X_amplitude) / X_amplitude)",
 )
 
 
@@ -118,9 +121,9 @@ class VisualizeDynamicsPhaseSpace:
             [[]],
             extent=extent,
             origin='lower',
-            aspect=1,
+            aspect=0.2,
             cmap='seismic',
-            norm=WignerSymLogNorm(linthresh=1e-10, vmin=-0.2, vmax=0.2),
+            norm=WignerSymLogNorm(linthresh=1e-10, vmin=-0.3, vmax=0.3),
             #norm=WignerNormalize(vmin=-0.01, vmax=0.1)
         )
 
@@ -169,7 +172,7 @@ class VisualizeDynamicsPhaseSpace:
         :return: image objects
         """
         # propagate the wigner function
-        self.img.set_array(self.quant_sys.propagate(200).get())
+        self.img.set_array(self.quant_sys.propagate(500).get())
 
         self.times.append(self.quant_sys.t)
 
@@ -233,3 +236,28 @@ plt.xlabel('time $t$ (a.u.)')
 
 plt.show()
 
+#################################################################
+#
+# Plot HHG spectra as FFT(<P>)
+#
+#################################################################
+
+N = len(quant_sys.P_average)
+
+# the windowed fft of the evolution
+# to remove the spectral leaking. For details see
+# rhttp://docs.scipy.org/doc/scipy/reference/tutorial/fftpack.html
+from scipy import fftpack
+from scipy.signal import blackman
+
+fft_P_average = fftpack.fft(blackman(N) * np.array(quant_sys.P_average))
+spectrum = np.abs(fftpack.fftshift(fft_P_average))**2
+omegas = fftpack.fftshift(fftpack.fftfreq(N, quant_sys.dt/(2*np.pi))) / quant_sys.omega
+
+plt.semilogy(omegas, spectrum)
+plt.ylabel('spectrum FFT($\\langle p \\rangle$)')
+plt.xlabel('frequency / $\\omega$')
+plt.xlim([0, 100.])
+#plt.ylim([1e-14, 1e3])
+
+plt.show()

@@ -68,12 +68,12 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         # allocate memory
         v_theta_x = gpuarray.zeros((self.Theta.size, self.X.size), np.float64)
 
-        fill_V = SourceModule(
-            self.fill_extended_V.format(cuda_consts=self.cuda_consts, V=self.V),
-        ).get_function("Kernel")
-
         # fill array with values of the potential energy
-        fill_V(v_theta_x, **self.expV_mapper_params)
+        fill_compiled = SourceModule(
+            self.fill_V_K.format(cuda_consts=self.cuda_consts, K=self.K, V=self.V)
+        )
+        fill_compiled.get_function("fill_V_bulk")(v_theta_x, **self.expV_bulk_mapper_params)
+        fill_compiled.get_function("fill_V_boundary")(v_theta_x, **self.expV_boundary_mapper_params)
 
         return gpuarray.min(v_theta_x).get()
 
@@ -84,12 +84,12 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         # allocate memory
         k_p_lambda = gpuarray.zeros((self.P.size, self.Lambda.size), np.float64)
 
-        fill_K = SourceModule(
-            self.fill_extended_K.format(cuda_consts=self.cuda_consts, K=self.K),
-        ).get_function("Kernel")
-
         # fill array with values of the kinetic energy
-        fill_K(k_p_lambda, **self.expK_mapper_params)
+        fill_compiled = SourceModule(
+            self.fill_V_K.format(cuda_consts=self.cuda_consts, K=self.K, V=self.V)
+        )
+        fill_compiled.get_function("fill_K_bulk")(k_p_lambda, **self.expK_bulk_mapper_params)
+        fill_compiled.get_function("fill_K_boundary")(k_p_lambda, **self.expK_boundary_mapper_params)
 
         return gpuarray.min(k_p_lambda).get()
 
@@ -102,16 +102,13 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         self.set_wignerfunction(1. / np.prod(self.wignerfunction.shape))
         return self.propagate(self.num_beta_steps)
 
-    expK_cuda_source = """
+    expK_expV_cuda_source = """
     /////////////////////////////////////////////////////////////////////////////
     //
     // Overloading WignerMoyalCUDA1D.expK_cuda_source
     //
     /////////////////////////////////////////////////////////////////////////////
 
-    // CUDA code to define the action of the kinetic energy exponent
-    // onto the wigner function in P Lambda representation
-
     #include<pycuda-complex.hpp>
     #include<math.h>
     #define _USE_MATH_DEFINES
@@ -124,80 +121,6 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
     __device__ double K(double P, double t)
     {{
         return ({K});
-    }}
-
-    __global__ void Kernel(cuda_complex *Z, double t)
-    {{
-        const size_t i = blockIdx.y;
-        const size_t j = threadIdx.x + blockDim.x*blockIdx.x;
-        const size_t indexTotal = threadIdx.x +
-            blockDim.x * blockIdx.x  + blockIdx.y * (blockDim.x + 1) * gridDim.x;
-
-        const double Lambda = dLambda * j;
-        const double P = dP * (i - 0.5 * P_gridDIM);
-
-        const double phase = -dbeta * (
-            K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial) - K_min
-        );
-
-        Z[indexTotal] *= exp(phase);
-    }}
-    """
-
-    fill_extended_K = """
-    /////////////////////////////////////////////////////////////////////////////
-    //
-    // set Z = K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial)
-    //
-    /////////////////////////////////////////////////////////////////////////////
-
-    #include<math.h>
-    #define _USE_MATH_DEFINES
-
-    {cuda_consts}
-
-    // Kinetic energy
-    __device__ double K(double P, double t)
-    {{
-        return ({K});
-    }}
-
-    __global__ void Kernel(double *Z)
-    {{
-        const size_t i = blockIdx.y;
-        const size_t j = threadIdx.x + blockDim.x*blockIdx.x;
-        const size_t indexTotal = threadIdx.x +
-            blockDim.x * blockIdx.x  + blockIdx.y * (blockDim.x + 1) * gridDim.x;
-
-        const double Lambda = dLambda * j;
-        const double P = dP * (i - 0.5 * P_gridDIM);
-
-        Z[indexTotal] = K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial);
-    }}
-    """
-
-    expV_cuda_source = """
-    /////////////////////////////////////////////////////////////////////////////
-    //
-    // Overloading WignerMoyalCUDA1D.expV_cuda_source
-    //
-    /////////////////////////////////////////////////////////////////////////////
-
-    // CUDA code to define the action of the potential energy exponent
-    // onto the wigner function in Theta X representation
-
-    #include<pycuda-complex.hpp>
-    #include<math.h>
-    #define _USE_MATH_DEFINES
-
-    typedef pycuda::complex<double> cuda_complex;
-
-    {cuda_consts}
-
-    // Absorbing boundary condition
-    __device__ double abs_boundary(double X)
-    {{
-        return ({abs_boundary});
     }}
 
     // Potential energy
@@ -206,11 +129,57 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         return ({V});
     }}
 
-    __global__ void Kernel(cuda_complex *Z, double t)
+    ////////////////////////////////////////////////////////////////////////////
+    //
+    // CUDA code to define the action of the kinetic energy exponent
+    // onto the wigner function in P Lambda representation
+    //
+    ////////////////////////////////////////////////////////////////////////////
+
+    __global__ void expK_bulk(cuda_complex *Z, double t)
     {{
         const size_t i = blockIdx.y;
-        const size_t j = threadIdx.x + blockDim.x*blockIdx.x;
-        const size_t indexTotal = threadIdx.x + blockDim.x * blockIdx.x  + blockIdx.y * blockDim.x * gridDim.x;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j  + i * (X_gridDIM / 2 + 1);
+
+        const double Lambda = dLambda * j;
+        const double P = dP * (i - 0.5 * P_gridDIM);
+
+        const double phase = -dbeta * (
+            K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial) - K_min
+        );
+
+        Z[indexTotal] *= exp(phase) * abs_boundary_lambda_p(Lambda, P);
+    }}
+
+    __global__ void expK_boundary(cuda_complex *Z, double t)
+    {{
+        const size_t i = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t j = X_gridDIM / 2;
+        const size_t indexTotal = j  + i * (X_gridDIM / 2 + 1);
+
+        const double Lambda = dLambda * j;
+        const double P = dP * (i - 0.5 * P_gridDIM);
+
+        const double phase = -dbeta * (
+            K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial) - K_min
+        );
+
+        Z[indexTotal] *= exp(phase) * abs_boundary_lambda_p(Lambda, P);
+    }}
+
+    ////////////////////////////////////////////////////////////////////////////
+    //
+    // CUDA code to define the action of the potential energy exponent
+    // onto the wigner function in Theta X representation
+    //
+    ////////////////////////////////////////////////////////////////////////////
+
+    __global__ void expV_bulk(cuda_complex *Z, double t)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
 
         const double X = dX * (j - 0.5 * X_gridDIM);
         const double Theta = dTheta * i;
@@ -220,17 +189,28 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
 
         const double phase = -0.5 * dbeta * (V(X_minus, t_initial) + V(X_plus, t_initial) - V_min);
 
-        Z[indexTotal] *= exp(phase) * abs_boundary(X_minus) * abs_boundary(X_plus);
+        Z[indexTotal] *= exp(phase) * abs_boundary_x_theta(X, Theta);
+    }}
+
+    __global__ void expV_boundary(cuda_complex *Z, double t)
+    {{
+        const size_t i = P_gridDIM / 2;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        const double X = dX * (j - 0.5 * X_gridDIM);
+        const double Theta = dTheta * i;
+
+        const double X_minus = X - 0.5 * Theta;
+        const double X_plus = X + 0.5 * Theta;
+
+        const double phase = -0.5 * dbeta * (V(X_minus, t_initial) + V(X_plus, t_initial) - V_min);
+
+        Z[indexTotal] *= exp(phase) * abs_boundary_x_theta(X, Theta);
     }}
     """
 
-    fill_extended_V = """
-    /////////////////////////////////////////////////////////////////////////////
-    //
-    // set Z = V( X - 0.5 * Theta, t_initial) + V( X + 0.5 * Theta, t_initial)
-    //
-    /////////////////////////////////////////////////////////////////////////////
-
+    fill_V_K = """
     #include<math.h>
     #define _USE_MATH_DEFINES
 
@@ -242,11 +222,23 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         return ({V});
     }}
 
-    __global__ void Kernel(double *Z)
+    // Kinetic energy
+    __device__ double K(double P, double t)
+    {{
+        return ({K});
+    }}
+
+    /////////////////////////////////////////////////////////////////////////////
+    //
+    // set Z = V( X - 0.5 * Theta, t_initial) + V( X + 0.5 * Theta, t_initial)
+    //
+    /////////////////////////////////////////////////////////////////////////////
+
+    __global__ void fill_V_bulk(double *Z)
     {{
         const size_t i = blockIdx.y;
-        const size_t j = threadIdx.x + blockDim.x*blockIdx.x;
-        const size_t indexTotal = threadIdx.x + blockDim.x * blockIdx.x  + blockIdx.y * blockDim.x * gridDim.x;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
 
         const double X = dX * (j - 0.5 * X_gridDIM);
         const double Theta = dTheta * i;
@@ -255,6 +247,51 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         const double X_plus = X + 0.5 * Theta;
 
         Z[indexTotal] = V(X_minus, t_initial) + V(X_plus, t_initial);
+    }}
+
+    __global__ void fill_V_boundary(double *Z)
+    {{
+        const size_t i = P_gridDIM / 2;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        const double X = dX * (j - 0.5 * X_gridDIM);
+        const double Theta = dTheta * i;
+
+        const double X_minus = X - 0.5 * Theta;
+        const double X_plus = X + 0.5 * Theta;
+
+        Z[indexTotal] = V(X_minus, t_initial) + V(X_plus, t_initial);
+    }}
+
+    /////////////////////////////////////////////////////////////////////////////
+    //
+    // set Z = K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial)
+    //
+    /////////////////////////////////////////////////////////////////////////////
+
+    __global__ void fill_K_bulk(double *Z)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j  + i * (X_gridDIM / 2 + 1);
+
+        const double Lambda = dLambda * j;
+        const double P = dP * (i - 0.5 * P_gridDIM);
+
+        Z[indexTotal] = K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial);
+    }}
+
+    __global__ void fill_K_boundary(double *Z)
+    {{
+        const size_t i = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t j = X_gridDIM / 2;
+        const size_t indexTotal = j  + i * (X_gridDIM / 2 + 1);
+
+        const double Lambda = dLambda * j;
+        const double P = dP * (i - 0.5 * P_gridDIM);
+
+        Z[indexTotal] = K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial);
     }}
     """
 
