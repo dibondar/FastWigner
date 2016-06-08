@@ -149,7 +149,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
             K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial) - K_min
         );
 
-        Z[indexTotal] *= exp(phase) * abs_boundary_lambda_p(Lambda, P);
+        Z[indexTotal] *= exp(phase) * ({abs_boundary_lambda_p});
     }}
 
     __global__ void expK_boundary(cuda_complex *Z, double t)
@@ -165,7 +165,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
             K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial) - K_min
         );
 
-        Z[indexTotal] *= exp(phase) * abs_boundary_lambda_p(Lambda, P);
+        Z[indexTotal] *= exp(phase) * ({abs_boundary_lambda_p});
     }}
 
     ////////////////////////////////////////////////////////////////////////////
@@ -189,7 +189,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
 
         const double phase = -0.5 * dbeta * (V(X_minus, t_initial) + V(X_plus, t_initial) - V_min);
 
-        Z[indexTotal] *= exp(phase) * abs_boundary_x_theta(X, Theta);
+        Z[indexTotal] *= exp(phase) * ({abs_boundary_x_theta});
     }}
 
     __global__ void expV_boundary(cuda_complex *Z, double t)
@@ -206,7 +206,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
 
         const double phase = -0.5 * dbeta * (V(X_minus, t_initial) + V(X_plus, t_initial) - V_min);
 
-        Z[indexTotal] *= exp(phase) * abs_boundary_x_theta(X, Theta);
+        Z[indexTotal] *= exp(phase) * ({abs_boundary_x_theta});
     }}
     """
 

@@ -32,11 +32,11 @@ sys_params = dict(
     # Lattice height
     V0=0.37,
 
-    P_gridDIM=1024,
-    P_amplitude=15.,
+    P_gridDIM=4*1024,
+    P_amplitude=8.,
 
     # Temperature in atomic units
-    kT=0.03,
+    kT=0.02,
 
     # Decay constant in the random collision model
     _gamma=0.01,
@@ -45,7 +45,7 @@ sys_params = dict(
     omega=0.05698,
 
     # field strength
-    F=0, #0.06,
+    F=0.18,
 
     functions="""
     // # The vector potential of laser field (the field will be on for 8 periods of laser field)
@@ -55,7 +55,7 @@ sys_params = dict(
     }}
     """,
 
-    abs_boundary_x_theta="exp(-dt * 0.0001 * Theta * Theta)",
+    abs_boundary_x_theta="exp(-dt * 1e-5 * Theta * Theta)",
     #abs_boundary_lambda_p="exp(-dt * 0.05 * Lambda * Lambda)",
     #abs_boundary_x_p="pow(abs(sin(0.5 * M_PI * (P + P_amplitude) / P_amplitude)), 2*dt*0.03)",
 
@@ -121,9 +121,9 @@ class VisualizeDynamicsPhaseSpace:
             [[]],
             extent=extent,
             origin='lower',
-            aspect=0.2,
+            aspect=0.5,
             cmap='seismic',
-            norm=WignerSymLogNorm(linthresh=1e-10, vmin=-0.3, vmax=0.3),
+            norm=WignerSymLogNorm(linthresh=1e-12, vmin=-0.3, vmax=0.3),
             #norm=WignerNormalize(vmin=-0.01, vmax=0.1)
         )
 

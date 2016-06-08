@@ -163,41 +163,16 @@ class WignerMoyalCUDA1D:
         #
         ##########################################################################################
 
-        # define empty functions, if the user has not defined it
-        try:
-            self.functions
-        except AttributeError:
-            self.functions = ''
-
         try:
             self.abs_boundary_x_theta
         except AttributeError:
             self.abs_boundary_x_theta = "1."
-
-        self.functions += """
-            // Absorbing boundary in x p
-            __device__ double abs_boundary_x_theta(double X, double Theta)
-            {{
-                return (%s);
-            }}
-            """ % self.abs_boundary_x_theta
-
-        ##########################################################################################
 
         try:
             self.abs_boundary_lambda_p
         except AttributeError:
             self.abs_boundary_lambda_p = "1."
 
-        self.functions += """
-            // Absorbing boundary in x p
-            __device__ double abs_boundary_lambda_p(double Lambda, double P)
-            {{
-                return (%s);
-            }}
-            """ % self.abs_boundary_lambda_p
-
-        ##########################################################################################
         try:
             self.abs_boundary_x_p
 
@@ -249,7 +224,7 @@ class WignerMoyalCUDA1D:
         )
 
         # CUDA block and grid for function expK_bulk
-        size_x = self.X_gridDIM  // 2
+        size_x = self.X_gridDIM // 2
         nproc = (size_x if size_x <= self.max_thread_block else gcd(size_x, self.max_thread_block))
 
         self.expK_bulk_mapper_params = dict(
@@ -272,8 +247,11 @@ class WignerMoyalCUDA1D:
         #
         ##########################################################################################
 
-        # Append user defined functions
-        self.cuda_consts += self.functions
+        try:
+            # Append user defined functions
+            self.cuda_consts += self.functions
+        except AttributeError:
+            pass
 
         if 'V_min' in self.expK_expV_cuda_source:
             self.cuda_consts += "    const double V_min = %.15e;\n" % self.get_V_min()
@@ -291,7 +269,8 @@ class WignerMoyalCUDA1D:
 
         expK_expV_compiled = SourceModule(
             self.expK_expV_cuda_source.format(
-                cuda_consts=self.cuda_consts, K=self.K, V=self.V
+                cuda_consts=self.cuda_consts, K=self.K, V=self.V,
+                abs_boundary_lambda_p=self.abs_boundary_lambda_p, abs_boundary_x_theta=self.abs_boundary_x_theta
             )
         )
 
@@ -583,8 +562,7 @@ class WignerMoyalCUDA1D:
             K(P + 0.5 * Lambda, t) - K(P - 0.5 * Lambda, t)
         );
 
-        Z[indexTotal] *= cuda_complex(cos(phase), sin(phase))
-                        * abs_boundary_lambda_p(Lambda, P);
+        Z[indexTotal] *= cuda_complex(cos(phase), sin(phase)) * ({abs_boundary_lambda_p});
     }}
 
     __global__ void expK_boundary(cuda_complex *Z, double t)
@@ -600,8 +578,7 @@ class WignerMoyalCUDA1D:
             K(P + 0.5 * Lambda, t) - K(P - 0.5 * Lambda, t)
         );
 
-        Z[indexTotal] *= cuda_complex(cos(phase), sin(phase))
-                        * abs_boundary_lambda_p(Lambda, P);
+        Z[indexTotal] *= cuda_complex(cos(phase), sin(phase)) * ({abs_boundary_lambda_p});
     }}
 
     ////////////////////////////////////////////////////////////////////////////
@@ -625,8 +602,7 @@ class WignerMoyalCUDA1D:
 
         const double phase = -0.5 * dt * (V(X_minus, t) - V(X_plus, t));
 
-        Z[indexTotal] *= cuda_complex(cos(phase), sin(phase))
-                        * abs_boundary_x_theta(X, Theta);
+        Z[indexTotal] *= cuda_complex(cos(phase), sin(phase)) * ({abs_boundary_x_theta});
     }}
 
     __global__ void expV_boundary(cuda_complex *Z, double t)
@@ -643,8 +619,7 @@ class WignerMoyalCUDA1D:
 
         const double phase = -0.5 * dt * (V(X_minus, t) - V(X_plus, t));
 
-        Z[indexTotal] *= cuda_complex(cos(phase), sin(phase))
-                        * abs_boundary_x_theta(X, Theta);
+        Z[indexTotal] *= cuda_complex(cos(phase), sin(phase)) * ({abs_boundary_x_theta});
     }}
     """
 
