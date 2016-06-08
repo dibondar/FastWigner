@@ -25,7 +25,7 @@ class MUBGibbsBand(MUBQBandStructure):
             vals, vecs = linalg.eigh(self.get_hamiltonian(k_val))
 
             # extract only first n eigenvectors
-            vecs = vecs[:, :n]
+            vecs = vecs[:,:n]
             vals = vals[:n]
 
             # Save eigenvalues
@@ -79,6 +79,27 @@ class MUBGibbsBand(MUBQBandStructure):
     def get_band_structure(self):
         return np.array(self.band_structure).T
 
+    def get_energy(self, rho):
+        """
+        Calculate the expectation value of the hamiltonian over the denisty matrix rho
+        :param rho: (numpy.array) denisty matrix
+        :return: float
+        """
+        # normalize the state
+        rho /= rho.trace()
+
+        # expectation value of the potential energy
+        average_V = np.dot(rho.diagonal().real, self.V(self.X_range))
+
+        # going into the momentum representation
+        rho_p = fftpack.fft2(rho)
+        rho_p /= rho_p.trace()
+
+        # expectation value of the kinetic energy
+        average_K = np.dot(rho_p.diagonal().real, self.K(self.P_range))
+
+        return average_K + average_V
+
 ##########################################################################################
 #
 # Example
@@ -118,20 +139,19 @@ if __name__ == '__main__':
     # initialize the system
     qsys = MUBGibbsBand(**sys_params)
 
-    # how many eV is in 1 a.u. of energy
-    au2eV = 27.
-
     # range of bloch vectors to compute the band structure
     k_ampl = np.pi / qsys.X_amplitude
-    K = np.linspace(-0.5, 0.5, 200)
+    K = np.linspace(-0.5 * k_ampl, 0.5 * k_ampl, 200)
 
     plt.subplot(121)
 
-    gibbs = qsys.get_gibbs(k_ampl * K, 5, 0.05)
+    gibbs = qsys.get_gibbs(K, 5, 0.05)
     is_physicial(gibbs)
+    print("Energy of the Gibbs state via MUB: %f (a.u.)" % qsys.get_energy(gibbs))
 
     gibbs_bloch = qsys.get_gibbs_bloch(0.05)
     is_physicial(gibbs_bloch)
+    print("Energy of the Gibbs state via Bloch: %f (a.u.)" % qsys.get_energy(gibbs_bloch))
 
     #plt.title("Gibbs state")
     #plt.imshow(np.real(gibbs), origin='lower')
@@ -147,10 +167,12 @@ if __name__ == '__main__':
 
     plt.subplot(122)
     for epsilon in qsys.get_band_structure():
-        plt.plot(K, au2eV * epsilon)
+        plt.plot(K, epsilon)
+
+    print("Mininum energy: %f (a.u.)" % qsys.get_band_structure().min())
 
     plt.title("Reproduction of Fig. 1 from M. Wu et al. Phys. Rev A 91, 043839 (2015)")
-    plt.xlabel("$k$ (units of $2\pi/ a_0$)")
-    plt.ylabel('$\\varepsilon(k)$ (eV)')
+    plt.xlabel("$k$ (a.u.)")
+    plt.ylabel('$\\varepsilon(k)$ (a.u.)')
 
     plt.show()

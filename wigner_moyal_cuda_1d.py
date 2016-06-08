@@ -35,6 +35,14 @@ class WignerMoyalCUDA1D:
             diff_K (optional) - a string of the C code specifying the kinetic energy derivative w.r.t. P
                                     for the Ehrenfest theorem calculations
             dt - time step
+
+            abs_boundary_x_p (optional) - a string of the C code specifying function of X and P,
+                                    which will be applied to the wigner function after each propagation step
+            abs_boundary_x_theta (optional) - a string of the C code specifying function of X and Theta,
+                                    which will be applied to the wigner function at each propagation step
+            abs_boundary_lambda_p (optional) - a string of the C code specifying function of Lambda and P,
+                                    which will be applied to the wigner function at each propagation step
+
             max_thread_block (optional) - the maximum number of GPU processes to be used (default 512)
         """
         # save all attributes
@@ -212,13 +220,13 @@ class WignerMoyalCUDA1D:
         )
 
         # CUDA block and grid for function expV
-        self.expV_bulk_mapper_params = dict(
+        self.V_bulk_mapper_params = dict(
             block=(nproc, 1, 1),
             grid=(size_x // nproc, self.P_gridDIM // 2)
         )
 
         # CUDA block and grid for function expV_boundary
-        self.expV_boundary_mapper_params = dict(
+        self.V_boundary_mapper_params = dict(
             block=(nproc, 1, 1),
             grid=(size_x // nproc, 1)
         )
@@ -227,7 +235,7 @@ class WignerMoyalCUDA1D:
         size_x = self.X_gridDIM // 2
         nproc = (size_x if size_x <= self.max_thread_block else gcd(size_x, self.max_thread_block))
 
-        self.expK_bulk_mapper_params = dict(
+        self.K_bulk_mapper_params = dict(
             block=(nproc, 1, 1),
             grid=(size_x // nproc, self.P_gridDIM)
         )
@@ -235,35 +243,22 @@ class WignerMoyalCUDA1D:
         # CUDA block and grid for function expK_boundary
         size_p = self.P_gridDIM
         nproc = (size_p if size_p <= self.max_thread_block else gcd(size_p, self.max_thread_block))
-        self.expK_boundary_mapper_params = dict(
+        self.K_boundary_mapper_params = dict(
             block=(nproc, 1, 1),
             grid=(size_p // nproc, 1)
         )
 
         ##########################################################################################
         #
-        # If the Gibbs state is calculated  then
-        # save the minimums of the potential (V) and kinetic (K) energy into self.cuda_consts
-        #
-        ##########################################################################################
-
-        try:
-            # Append user defined functions
-            self.cuda_consts += self.functions
-        except AttributeError:
-            pass
-
-        if 'V_min' in self.expK_expV_cuda_source:
-            self.cuda_consts += "    const double V_min = %.15e;\n" % self.get_V_min()
-
-        if 'K_min' in self.expK_expV_cuda_source:
-            self.cuda_consts += "    const double K_min = %.15e;\n" % self.get_K_min()
-
-        ##########################################################################################
-        #
         # Generate CUDA functions applying the exponents
         #
         ##########################################################################################
+
+        # Append user defined functions
+        try:
+            self.cuda_consts += self.functions
+        except AttributeError:
+            pass
 
         print("\n================================ Compiling expK and expV ================================\n")
 
@@ -303,37 +298,29 @@ class WignerMoyalCUDA1D:
 
         ##########################################################################################
         #
+        #   Initialize facility for calculating expectation values of the cuurent wigner function
+        #   see the implementation of self.get_average
+        #
+        ##########################################################################################
+
+        # This array is used for expectation value calculation
+        self._weighted = gpuarray.empty_like(self.wignerfunction)
+
+        # hash table of cuda compiled functions that calculate an average of specified observable
+        self._compiled_observable = dict()
+
+        ##########################################################################################
+        #
         #   Ehrenfest theorems (optional)
         #
         ##########################################################################################
+
+        self.hamiltonian = self.K + ' + ' + self.V
 
         try:
             # Check whether the necessary terms are specified to calculate the Ehrenfest theorems
             self.diff_K
             self.diff_V
-
-            print("\n================================ Compiling Ehrenfest functions ================================\n")
-
-            self.get_p = SourceModule(
-                self.weighted_func_cuda_code.format(cuda_consts=self.cuda_consts, func="P"),
-            ).get_function("Kernel")
-
-            self.get_diff_K = SourceModule(
-                self.weighted_func_cuda_code.format(cuda_consts=self.cuda_consts, func=self.diff_K),
-            ).get_function("Kernel")
-
-            self.get_x = SourceModule(
-                self.weighted_func_cuda_code.format(cuda_consts=self.cuda_consts, func="X"),
-            ).get_function("Kernel")
-
-            self.get_diff_V = SourceModule(
-                self.weighted_func_cuda_code.format(cuda_consts=self.cuda_consts, func=self.diff_V),
-            ).get_function("Kernel")
-
-            hamiltonian_str = self.K + " + " + self.V
-            self.get_hamiltonian = SourceModule(
-                self.weighted_func_cuda_code.format(cuda_consts=self.cuda_consts, func=hamiltonian_str),
-            ).get_function("Kernel")
 
             # Lists where the expectation values of X and P
             self.X_average = []
@@ -346,9 +333,6 @@ class WignerMoyalCUDA1D:
             # List where the expectation value of the Hamiltonian will be calculated
             self.hamiltonian_average = []
 
-            # This array is used for Ehrenfest theorem calculations
-            self.weighted = gpuarray.empty_like(self.wignerfunction)
-
             # Flag requesting tha the Ehrenfest theorem calculations
             self.isEhrenfest = True
 
@@ -358,6 +342,45 @@ class WignerMoyalCUDA1D:
             self.isEhrenfest = False
 
         self.print_memory_info()
+
+    def get_average(self, observable):
+        """
+        Return the expectation value of the observable with respcte to the current wigner function
+        :param observable: (str)
+        :return: float
+        """
+        # Compile the corresponding cuda functions, if it has not been done
+        try:
+            func = self._compiled_observable[observable]
+        except KeyError:
+            print("\n============================== Compiling [%s] ==============================\n" % observable)
+            func = self._compiled_observable[observable] = SourceModule(
+                self.weighted_func_cuda_code.format(cuda_consts=self.cuda_consts, func=observable),
+            ).get_function("Kernel")
+
+        # Execute underlying function
+        func(self.wignerfunction, self._weighted, self.t, **self.wigner_mapper_params)
+
+        return gpuarray.sum(self._weighted).get() * self.dXdP
+
+    def get_purity(self):
+        """
+        Return the purity of the current Wigner function, 2*np.pi*np.sum(W**2)*dXdP
+        :return: float
+        """
+        return 2. * np.pi * gpuarray.dot(self.wignerfunction, self.wignerfunction).get() * self.dXdP
+
+    def get_sigma_x_sigma_p(self):
+        """
+        Return the product of standart deviation of coordinate and momentum,
+        the LHS of the Heisenberg uncertainty principle:
+            sigma_p * sigma_p >= 0.5
+        :return: float
+        """
+        return np.sqrt(
+            (self.get_average("X * X") - self.get_average("X")**2)
+            * (self.get_average("P * P") - self.get_average("P")**2)
+        )
 
     @classmethod
     def print_memory_info(cls):
@@ -444,18 +467,18 @@ class WignerMoyalCUDA1D:
         :return: self.wignerfunction
         """
         self.p2theta_transform()
-        self.expV_bulk(self.wigner_theta_x, self.t, **self.expV_bulk_mapper_params)
-        self.expV_boundary(self.wigner_theta_x, self.t, **self.expV_boundary_mapper_params)
+        self.expV_bulk(self.wigner_theta_x, self.t, **self.V_bulk_mapper_params)
+        self.expV_boundary(self.wigner_theta_x, self.t, **self.V_boundary_mapper_params)
         self.theta2p_transform()
 
         self.x2lambda_transform()
-        self.expK_bulk(self.wigner_p_lambda, self.t, **self.expK_bulk_mapper_params)
-        self.expK_boundary(self.wigner_p_lambda, self.t, **self.expK_boundary_mapper_params)
+        self.expK_bulk(self.wigner_p_lambda, self.t, **self.K_bulk_mapper_params)
+        self.expK_boundary(self.wigner_p_lambda, self.t, **self.K_boundary_mapper_params)
         self.lambda2x_transform()
 
         self.p2theta_transform()
-        self.expV_bulk(self.wigner_theta_x, self.t, **self.expV_bulk_mapper_params)
-        self.expV_boundary(self.wigner_theta_x, self.t, **self.expV_boundary_mapper_params)
+        self.expV_bulk(self.wigner_theta_x, self.t, **self.V_bulk_mapper_params)
+        self.expV_boundary(self.wigner_theta_x, self.t, **self.V_boundary_mapper_params)
         self.theta2p_transform()
 
         if self.abs_boundary_x_p:
@@ -492,34 +515,19 @@ class WignerMoyalCUDA1D:
         """
         if self.isEhrenfest:
             # save the current value of <X>
-            self.get_x(self.wignerfunction, self.weighted, t, **self.wigner_mapper_params)
-            self.X_average.append(
-                gpuarray.sum(self.weighted).get() * self.dXdP
-            )
+            self.X_average.append(self.get_average("X"))
 
             # save the current value of <diff_K>
-            self.get_diff_K(self.wignerfunction, self.weighted, t, **self.wigner_mapper_params)
-            self.X_average_RHS.append(
-                gpuarray.sum(self.weighted).get() * self.dXdP
-            )
+            self.X_average_RHS.append(self.get_average(self.diff_K))
 
             # save the current value of <P>
-            self.get_p(self.wignerfunction, self.weighted, t, **self.wigner_mapper_params)
-            self.P_average.append(
-                gpuarray.sum(self.weighted).get() * self.dXdP
-            )
+            self.P_average.append(self.get_average("P"))
 
             # save the current value of <-diff_V>
-            self.get_diff_V(self.wignerfunction, self.weighted, t, **self.wigner_mapper_params)
-            self.P_average_RHS.append(
-                -gpuarray.sum(self.weighted).get() * self.dXdP
-            )
+            self.P_average_RHS.append(-self.get_average(self.diff_V))
 
             # save the current expectation value of energy
-            self.get_hamiltonian(self.wignerfunction, self.weighted, t, **self.wigner_mapper_params)
-            self.hamiltonian_average.append(
-                gpuarray.sum(self.weighted).get() * self.dXdP
-            )
+            self.hamiltonian_average.append(self.get_average(self.hamiltonian))
 
     expK_expV_cuda_source = """
     #include<pycuda-complex.hpp>
@@ -646,9 +654,9 @@ class WignerMoyalCUDA1D:
 
     weighted_func_cuda_code = """
     // CUDA code to calculate
-    //      weighted = W(X, P, t) * func(X, P, t).
-    // This is used in the Ehrenfest theorems verification since
-    // weighted.sum()*dX*dP is the average of func(X, P, t) over the Wigner function
+    //      _weighted = W(X, P, t) * func(X, P, t).
+    // This is used in self.get_average
+    // _weighted.sum()*dX*dP is the average of func(X, P, t) over the Wigner function
 
     #include<math.h>
     #define _USE_MATH_DEFINES

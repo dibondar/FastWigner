@@ -33,10 +33,12 @@ sys_params = dict(
     V0=0.37,
 
     P_gridDIM=4*1024,
-    P_amplitude=8.,
+    P_amplitude=9.,
 
     # Temperature in atomic units
-    kT=0.02,
+    #kT=0.001,
+    kT = 0.001,
+    dbeta=0.1,
 
     # Decay constant in the random collision model
     _gamma=0.01,
@@ -45,7 +47,7 @@ sys_params = dict(
     omega=0.05698,
 
     # field strength
-    F=0.18,
+    F=0., # 0.18,
 
     functions="""
     // # The vector potential of laser field (the field will be on for 8 periods of laser field)
@@ -250,14 +252,20 @@ N = len(quant_sys.P_average)
 from scipy import fftpack
 from scipy.signal import blackman
 
-fft_P_average = fftpack.fft(blackman(N) * np.array(quant_sys.P_average))
-spectrum = np.abs(fftpack.fftshift(fft_P_average))**2
+# obtain current
+J = -(np.array(quant_sys.P_average) + quant_sys.A(times))
+
+fft_J = fftpack.fft(blackman(N) * J)
+spectrum = np.abs(fftpack.fftshift(fft_J))**2
 omegas = fftpack.fftshift(fftpack.fftfreq(N, quant_sys.dt/(2*np.pi))) / quant_sys.omega
+
+
+spectrum /= spectrum.max()
 
 plt.semilogy(omegas, spectrum)
 plt.ylabel('spectrum FFT($\\langle p \\rangle$)')
 plt.xlabel('frequency / $\\omega$')
 plt.xlim([0, 100.])
-#plt.ylim([1e-14, 1e3])
+plt.ylim([1e-15, 1.])
 
 plt.show()
