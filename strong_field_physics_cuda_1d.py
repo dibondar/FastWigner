@@ -32,13 +32,14 @@ sys_params = dict(
     # Lattice height
     V0=0.37,
 
-    P_gridDIM=4*1024,
-    P_amplitude=9.,
+    P_gridDIM=1024,
+
+    #P_amplitude=9.,
+    P_amplitude = 20 * np.pi / 8., # P_amplitude = 0.5 * np.pi / self.X_amplitude
 
     # Temperature in atomic units
     #kT=0.001,
-    kT = 0.001,
-    dbeta=0.1,
+    #kT = 0.001,
 
     # Decay constant in the random collision model
     _gamma=0.01,
@@ -47,7 +48,7 @@ sys_params = dict(
     omega=0.05698,
 
     # field strength
-    F=0., # 0.18,
+    F=0.18,
 
     functions="""
     // # The vector potential of laser field (the field will be on for 8 periods of laser field)
@@ -57,9 +58,7 @@ sys_params = dict(
     }}
     """,
 
-    abs_boundary_x_theta="exp(-dt * 1e-5 * Theta * Theta)",
-    #abs_boundary_lambda_p="exp(-dt * 0.05 * Lambda * Lambda)",
-    #abs_boundary_x_p="pow(abs(sin(0.5 * M_PI * (P + P_amplitude) / P_amplitude)), 2*dt*0.03)",
+    #abs_boundary_x_theta="exp(-dt * 5e-6 * Theta * Theta)",
 
     # The same as C code
     A=lambda self, t: -self.F/self.omega * np.sin(self.omega * t) * np.sin(self.omega * t / 16.)**2,
@@ -147,15 +146,15 @@ class VisualizeDynamicsPhaseSpace:
         :return:
         """
         # Create propagator
-        self.quant_sys = WignerMoyalCUDA1D(**self.sys_params)
+        self.quant_sys = WignerBlochCUDA1D(**self.sys_params)
 
         # List to save times
         self.times = [self.quant_sys.t]
 
         # set the Gibbs state as initial condition
-        self.quant_sys.set_wignerfunction(
-            WignerBlochCUDA1D(**self.sys_params).get_gibbs_state()
-        )
+        self.quant_sys.get_ground_state()
+
+        print("Purity: 1 - %.1e" % (1 - self.quant_sys.get_purity()))
 
     def empty_frame(self):
         """
@@ -175,6 +174,8 @@ class VisualizeDynamicsPhaseSpace:
         """
         # propagate the wigner function
         self.img.set_array(self.quant_sys.propagate(500).get())
+
+        print("Purity: 1 - %.1e" % (1 - self.quant_sys.get_purity()))
 
         self.times.append(self.quant_sys.t)
 
@@ -265,7 +266,7 @@ spectrum /= spectrum.max()
 plt.semilogy(omegas, spectrum)
 plt.ylabel('spectrum FFT($\\langle p \\rangle$)')
 plt.xlabel('frequency / $\\omega$')
-plt.xlim([0, 100.])
-plt.ylim([1e-15, 1.])
+plt.xlim([0, 240.])
+plt.ylim([1e-30, 1.])
 
 plt.show()

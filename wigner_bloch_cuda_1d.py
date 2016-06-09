@@ -18,7 +18,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         """
         In addition to kwagrs of WignerMoyalCUDA1D.__init__ this constructor accepts:
 
-        kT - the temperature for the Gibbs state [rho = exp(-H/kT)]
+        kT (optional)- the temperature for the Gibbs state [rho = exp(-H/kT)]
         dbeta (optional) -  inverse temperature increments for the split-operator propagation
         t_initial (optional) - if the Hamiltonian is time dependent, then the the Gibbs state will be calculated
             for the hamiltonian at t_initial (default value of zero).
@@ -29,8 +29,10 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
 
         try:
             self.kT = kwargs['kT']
+            # remove kT from kwargs so that it does not enter into self.cuda_consts
+            del kwargs['kT']
         except KeyError:
-            raise AttributeError("Temperature (kT) was not specified")
+            self.kT = 0.
 
         try:
             self.dbeta = kwargs['dbeta']
@@ -43,19 +45,6 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         if 'dt' not in kwargs:
             # Save the inverse temperature increment as dt
             kwargs.update(dt=self.dbeta)
-
-        if self.kT > 0:
-            # get number of dbeta steps to reach the desired Gibbs state
-            self.num_beta_steps = 1. / (self.kT*self.dbeta)
-
-            if round(self.num_beta_steps) <> self.num_beta_steps:
-                # Changing self.dbeta so that num_beta_steps is an exact integer
-                self.num_beta_steps = round(self.num_beta_steps)
-                self.dbeta = 1. / (self.kT*self.num_beta_steps)
-
-            self.num_beta_steps = int(self.num_beta_steps)
-
-        self.dbeta = np.float64(self.dbeta)
 
         # Initialize parent class
         WignerMoyalCUDA1D.__init__(self, **kwargs)
@@ -111,51 +100,103 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
 
         return gpuarray.min(k_p_lambda).get()
 
-    def get_gibbs_state(self):
+    @classmethod
+    def get_dbeta_num_beta_steps(cls, kT, dbeta):
+        """
+        Calculate the number of propagation steps (num_beta_steps) and the inverse temperature step size (dbeta)
+        needed to reach the Gibbs state with temperature kT
+        :param kT: (float) temperature of the desired Gibbs state
+        :param dbeta: (float) initial guess for the inverse temperature step size
+        :return: dbeta, num_beta_steps
+        """
+        if kT > 0:
+            # get number of dbeta steps to reach the desired Gibbs state
+            num_beta_steps = 1. / (kT * dbeta)
+
+            if round(num_beta_steps) <> num_beta_steps:
+                # Changing self.dbeta so that num_beta_steps is an exact integer
+                num_beta_steps = round(num_beta_steps)
+                dbeta = 1. / (kT * num_beta_steps)
+
+            num_beta_steps = int(num_beta_steps)
+        else:
+            # assume zero temperature
+            num_beta_steps = np.inf
+
+        return dbeta, num_beta_steps
+
+
+    def get_gibbs_state(self, kT=None, dbeta=None):
         """
         Calculate the Boltzmann-Gibbs state and save it in self.wignerfunction
-        :return: GPUArray with Boltzmann-Gibbs state
+        :param dbeta: (float) the inverse temperature step increment
+        :param kT: (float) temperature of the desired Gibbs state
+        :return: self.wignerfunction
         """
-        # Set the initial state and propagate
+        # initialize the propagation parameters
+        if dbeta is None:
+            dbeta = self.dbeta
+
+        if kT is None:
+            kT = self.kT
+
+        dbeta, num_beta_steps = self.get_dbeta_num_beta_steps(kT, dbeta)
+        dbeta = np.float64(dbeta)
+
+        # Set the infinite temperature initial state
         self.set_wignerfunction(1. / np.prod(self.wignerfunction.shape))
 
-        for _ in xrange(self.num_beta_steps):
-            # advance by one time step
-            self.bloch_single_step_propagation(self.dbeta)
+        try:
+            for k in xrange(num_beta_steps):
+                # advance by one time step
+                self.bloch_single_step_propagation(dbeta)
 
-            # normalization
-            #self.wignerfunction /= gpuarray.sum(self.wignerfunction).get() * self.dXdP
+                # verify whether the obtained state is physical:
+                # Purity cannot be larger than one
+                current_purity = self.get_purity()
+                assert current_purity < 1.
 
-        print("Purity %.6f; Uncertanty %.3f" % (self.get_purity(), self.get_sigma_x_sigma_p()))
+        except AssertionError:
+            print(
+                "Warning: Gibbs state calculations interupted because purity = %.10f > 1."
+                "Current kT = %.6f" % (self.get_purity(), 1 / (k * dbeta))
+            )
 
         return self.wignerfunction
 
-    def get_ground_state(self, dbeta=0.5):
-
-        # Set the initial state and propagate
-        self.set_wignerfunction(1. / np.prod(self.wignerfunction.shape))
-
+    def get_ground_state(self, dbeta=None, abs_tol_purity=1e-12):
+        """
+        Obtain the ground state Wigner function with specified accuracy
+        :param dbeta: (float) the inverse temperature step increment
+        :param abs_tol_purity: (float) the obtained Wigner function the termination criterion
+        :return: self.wignerfunction
+        """
         # Initialize varaibles
         previous_energy = current_energy = np.inf
-        dbeta = np.float64(dbeta)
         previous_purity = current_purity = 0.
+
+        if dbeta is None:
+            dbeta = self.dbeta
+        dbeta = np.float64(dbeta)
+
+        # Set the infinite temperature initial state
+        self.set_wignerfunction(1. / np.prod(self.wignerfunction.shape))
 
         # Allocate memory for extra copy of the Wigner function
         previous_wigner_function = self.wignerfunction.copy()
 
-        #while current_purity < (1. - 1e-7):
-        while True:
+        while current_purity < (1. - abs_tol_purity) and dbeta > 1e-12:
             # advance by one time step
             self.bloch_single_step_propagation(dbeta)
 
             try:
+                # Purity cannot be larger than one
+                current_purity = self.get_purity()
+                assert current_purity <= 1.
+
                 # Check whether the state cooled
                 current_energy = self.get_average(self.hamiltonian)
                 assert current_energy < previous_energy
-
-                # Purity cannot be larger than one
-                #current_purity = self.get_purity()
-                #assert current_purity <= 1.
 
                 # Verify the uncertainty principle
                 assert self.get_sigma_x_sigma_p() >= 0.5
@@ -163,8 +204,6 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
                 # the current state seems to be physical, so we accept it
                 previous_energy = current_energy
                 previous_purity = current_purity
-
-                print current_purity, current_energy, dbeta
 
                 # make a copy of the current state
                 gpuarray._memcpy_discontig(previous_wigner_function, self.wignerfunction)
@@ -176,8 +215,6 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
 
                 # and half the step size
                 dbeta *= 0.5
-
-                #print dbeta
 
                 # restore the original settings
                 current_energy = previous_energy
@@ -259,7 +296,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
             K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial) - K_min
         );
 
-        Z[indexTotal] *= exp(phase) * ({abs_boundary_lambda_p});
+        Z[indexTotal] *= exp(phase); // * ({abs_boundary_lambda_p});
     }}
 
     __global__ void bloch_expK_boundary(cuda_complex *Z, double dbeta)
@@ -275,7 +312,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
             K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial) - K_min
         );
 
-        Z[indexTotal] *= exp(phase) * ({abs_boundary_lambda_p});
+        Z[indexTotal] *= exp(phase); // * ({abs_boundary_lambda_p});
     }}
 
     ////////////////////////////////////////////////////////////////////////////
@@ -298,7 +335,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
             V(X - 0.5 * Theta, t_initial) + V(X + 0.5 * Theta, t_initial) - V_min
         );
 
-        Z[indexTotal] *= exp(phase) * ({abs_boundary_x_theta});
+        Z[indexTotal] *= exp(phase); // * ({abs_boundary_x_theta});
     }}
 
     __global__ void bloch_expV_boundary(cuda_complex *Z, double dbeta)
@@ -314,7 +351,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
             V(X - 0.5 * Theta, t_initial) + V(X + 0.5 * Theta, t_initial) - V_min
         );
 
-        Z[indexTotal] *= exp(phase) * ({abs_boundary_x_theta});
+        Z[indexTotal] *= exp(phase); // * ({abs_boundary_x_theta});
     }}
     """
 
