@@ -125,7 +125,6 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
 
         return dbeta, num_beta_steps
 
-
     def get_gibbs_state(self, kT=None, dbeta=None):
         """
         Calculate the Boltzmann-Gibbs state and save it in self.wignerfunction
@@ -208,6 +207,10 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
                 # make a copy of the current state
                 gpuarray._memcpy_discontig(previous_wigner_function, self.wignerfunction)
 
+                print(
+                    "Current energy: %.5f; purity: 1 - %.2e; dbeta: %.2e"
+                    % (current_energy, 1 - current_purity, dbeta)
+                )
             except AssertionError:
                 # the current state is unphysical,
                 # revert the propagation
