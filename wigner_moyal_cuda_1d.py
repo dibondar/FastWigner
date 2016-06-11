@@ -303,16 +303,20 @@ class WignerMoyalCUDA1D:
         if size_theta_x > size_p_lambda:
             # since Theta X representation requires more memory, allocate it
             self.wigner_theta_x = gpuarray.zeros((self.Theta.size, self.X.size), np.complex128)
+            gpudata = self.wigner_theta_x.gpudata
+
             # for P Lambda representation uses a smaller subspace
             self.wigner_p_lambda = gpuarray.GPUArray(
-                (self.P.size, self.Lambda.size), dtype=np.complex128, gpudata=self.wigner_theta_x.gpudata
+                (self.P.size, self.Lambda.size), self.wigner_theta_x.dtype, gpudata=gpudata
             )
         else:
             # since  P Lambda representation requires more memory, allocate it
             self.wigner_p_lambda = gpuarray.zeros((self.P.size, self.Lambda.size), np.complex128)
+            gpudata = self.wigner_p_lambda.gpudata
+
             # for Theta X representation uses a smaller subspace
             self.wigner_theta_x = gpuarray.GPUArray(
-                (self.Theta.size, self.X.size), dtype=np.complex128, gpudata=self.wigner_p_lambda.gpudata
+                (self.Theta.size, self.X.size), self.wigner_p_lambda.dtype, gpudata=gpudata
             )
 
         # Just a test: That both the arrays are using the same memory
@@ -326,7 +330,12 @@ class WignerMoyalCUDA1D:
         ##########################################################################################
 
         # This array is used for expectation value calculation
-        self._weighted = gpuarray.empty_like(self.wignerfunction)
+        self._weighted = gpuarray.GPUArray(
+            self.wignerfunction.shape, self.wignerfunction.dtype, gpudata=gpudata
+        )
+
+        # Just a test: That both the arrays are using the same memory
+        assert self.wigner_p_lambda.gpudata is self._weighted.gpudata
 
         # hash table of cuda compiled functions that calculate an average of specified observable
         self._compiled_observable = dict()
