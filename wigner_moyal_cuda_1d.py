@@ -288,13 +288,35 @@ class WignerMoyalCUDA1D:
 
         ##########################################################################################
         #
-        #  Allocate memory for the Wigner functions and marginals
+        # Allocate memory for the wigner function in the theta x and p lambda representations
+        # by reusing the memory
         #
         ##########################################################################################
 
+        # find sizes of each representations
+        size_theta_x = self.Theta.size * self.X.size
+        size_p_lambda = self.P.size * self.Lambda.size
+
+        # Allocate the Wigner function in the X and P representation
         self.wignerfunction = gpuarray.zeros((self.P.size, self.X.size), np.float64)
-        self.wigner_theta_x = gpuarray.zeros((self.Theta.size, self.X.size), np.complex128)
-        self.wigner_p_lambda = gpuarray.zeros((self.P.size, self.Lambda.size), np.complex128)
+
+        if size_theta_x > size_p_lambda:
+            # since Theta X representation requires more memory, allocate it
+            self.wigner_theta_x = gpuarray.zeros((self.Theta.size, self.X.size), np.complex128)
+            # for P Lambda representation uses a smaller subspace
+            self.wigner_p_lambda = gpuarray.GPUArray(
+                (self.P.size, self.Lambda.size), dtype=np.complex128, gpudata=self.wigner_theta_x.gpudata
+            )
+        else:
+            # since  P Lambda representation requires more memory, allocate it
+            self.wigner_p_lambda = gpuarray.zeros((self.P.size, self.Lambda.size), np.complex128)
+            # for Theta X representation uses a smaller subspace
+            self.wigner_theta_x = gpuarray.GPUArray(
+                (self.Theta.size, self.X.size), dtype=np.complex128, gpudata=self.wigner_p_lambda.gpudata
+            )
+
+        # Just a test: That both the arrays are using the same memory
+        assert self.wigner_p_lambda.gpudata is self.wigner_theta_x.gpudata
 
         ##########################################################################################
         #
