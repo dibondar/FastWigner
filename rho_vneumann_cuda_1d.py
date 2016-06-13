@@ -1,0 +1,781 @@
+import pycuda.gpuarray as gpuarray
+import pycuda.autoinit
+from pycuda.compiler import SourceModule
+import numpy as np
+from fractions import gcd
+from types import MethodType, FunctionType
+import cufft
+
+
+class RhoVNeumannCUDA1D:
+    """
+    The second-order split-operator propagator for the von Neumann equation for the denisty matrix rho(x,x',t)
+    with the time-dependent Hamiltonian H = K(p, t) + V(x, t) using CUDA.
+    """
+    def __init__(self, **kwargs):
+        """
+        The following parameters are to be specified
+            X_gridDIM - the coordinate grid size
+            X_amplitude - maximum value of the coordinates
+            t (optional) - initial value of time (default t = 0)
+            consts (optional) - a string of the C code declaring the constants
+            functions (optional) -  a string of the C code declaring auxiliary functions
+            V - a string of the C code specifying potential energy. Coordinate (X) and time (t) variables are declared.
+            K - a string of the C code specifying kinetic energy. Momentum (P) and time (t) variables are declared.
+            diff_V (optional) - a string of the C code specifying the potential energy derivative w.r.t. X
+                                    for the Ehrenfest theorem calculations
+            diff_K (optional) - a string of the C code specifying the kinetic energy derivative w.r.t. P
+                                    for the Ehrenfest theorem calculations
+            dt - time step
+
+            abs_boundary_p (optional) - a string of the C code specifying function of P,
+                                    which will be applied to the density matrix at each propagation step
+            abs_boundary_x (optional) - a string of the C code specifying function of X,
+                                    which will be applied to the density matrix at each propagation step
+
+            max_thread_block (optional) - the maximum number of GPU processes to be used (default 512)
+        """
+        # save all attributes
+        for name, value in kwargs.items():
+            # if the value supplied is a function, then dynamically assign it as a method;
+            # otherwise bind it a property
+            if isinstance(value, FunctionType):
+                setattr(self, name, MethodType(value, self, self.__class__))
+            else:
+                setattr(self, name, value)
+
+        # Check that all attributes were specified
+        try:
+            self.X_gridDIM
+        except AttributeError:
+            raise AttributeError("Coordinate grid size (X_gridDIM) was not specified")
+
+        try:
+            self.X_amplitude
+        except AttributeError:
+            raise AttributeError("Coordinate grid range (X_amplitude) was not specified")
+
+        try:
+            self.V
+        except AttributeError:
+            raise AttributeError("Potential energy (V) was not specified")
+
+        try:
+            self.K
+        except AttributeError:
+            raise AttributeError("Momentum dependence (K) was not specified")
+
+        try:
+            self.dt
+        except AttributeError:
+            raise AttributeError("Time-step (dt) was not specified")
+
+        try:
+            self.t
+            del kwargs['t']
+        except AttributeError:
+            print("Warning: Initial time (t) was not specified, thus it is set to zero.")
+            self.t = 0.
+
+        self.t = np.float64(self.t)
+
+        ##########################################################################################
+        #
+        # Generating grids
+        #
+        ##########################################################################################
+
+        # get coordinate and momentum step sizes
+        self.dX = 2. * self.X_amplitude / self.X_gridDIM
+
+        # coordinate grid
+        self.X = np.linspace(-self.X_amplitude, self.X_amplitude - self.dX, self.X_gridDIM)
+
+        # P grid (variable conjugate to the coordinate)
+        self.P = np.fft.fftfreq(self.X_gridDIM, self.dX / (2 * np.pi))
+        self.dP = self.P[1] - self.P[0]
+
+        ##########################################################################################
+        #
+        # Save CUDA constants
+        #
+        ##########################################################################################
+
+        kwargs.update(dX=self.dX, dP=self.dP)
+
+        self.cuda_consts = ""
+
+        # Convert real constants into CUDA code
+        for name, value in kwargs.items():
+            if isinstance(value, int):
+                self.cuda_consts += "    const int %s = %d;\n" % (name, value)
+            elif isinstance(value, float):
+                self.cuda_consts += "    const double %s = %.15e;\n" % (name, value)
+
+        # Append user defined constants, if specified
+        try:
+            self.cuda_consts += self.consts
+        except AttributeError:
+            pass
+
+        ##########################################################################################
+        #
+        # Absorbing boundaries in different representations
+        #
+        ##########################################################################################
+
+        try:
+            self.abs_boundary_x
+        except AttributeError:
+            self.abs_boundary_x = "1."
+
+        try:
+            self.abs_boundary_p
+        except AttributeError:
+            self.abs_boundary_p = "1."
+
+        ##########################################################################################
+        #
+        #   Define block and grid parameters for CUDA kernel
+        #
+        ##########################################################################################
+
+        #  Make sure that self.max_thread_block is defined
+        # i.e., the maximum number of GPU processes to be used (default 512)
+        try:
+            self.max_thread_block
+        except AttributeError:
+            self.max_thread_block = 512
+
+        # If the X grid size is smaller or equal to the max number of CUDA threads
+        # then use all self.X_gridDIM processors
+        # otherwise number of processor to be used is the greatest common divisor of these two attributes
+        size_x = self.X_gridDIM
+        nproc = (size_x if size_x <= self.max_thread_block else gcd(size_x, self.max_thread_block))
+
+        # CUDA block and grid for functions that act on the whole density matrix
+        self.rho_mapper_params = dict(
+            block=(nproc, 1, 1),
+            grid=(size_x // nproc, self.X_gridDIM)
+        )
+
+        # CUDA block and grid for extracting the density matrix diagonal
+        self.diag_mapper_params = dict(
+            block=(nproc, 1, 1),
+            grid=(size_x // nproc, 1)
+        )
+
+        ##########################################################################################
+        #
+        # Generate CUDA functions applying the exponents
+        #
+        ##########################################################################################
+
+        # Append user defined functions
+        try:
+            self.cuda_consts += self.functions
+        except AttributeError:
+            pass
+
+        print("\n================================ Compiling expK and expV ================================\n")
+
+        expK_expV_compiled = SourceModule(
+            self.expK_expV_cuda_source.format(
+                cuda_consts=self.cuda_consts, K=self.K, V=self.V,
+                abs_boundary_p=self.abs_boundary_p, abs_boundary_x=self.abs_boundary_x
+            )
+        )
+
+        self.expK = expK_expV_compiled.get_function("expK")
+        self.expV = expK_expV_compiled.get_function("expV")
+
+        ##########################################################################################
+        #
+        # Set-up CUDA FFT
+        #
+        ##########################################################################################
+
+        self.plan_Z2Z = cufft.PlanZ2Z((self.X.size, self.X.size), cufft.CUFFT_Z2Z)
+
+        ##########################################################################################
+        #
+        # Allocate memory for the wigner function in the theta x and p lambda representations
+        # by reusing the memory
+        #
+        ##########################################################################################
+
+        # the density matrix (central object) in the coordinate representation
+        self.rho = gpuarray.GPUArray((self.X.size, self.X.size), np.complex128)
+
+        # the density matrix in the momentum representation
+        self.rho_p = gpuarray.empty_like(self.rho)
+
+        ##########################################################################################
+        #
+        #   Initialize facility for calculating expectation values of the curent density matrix
+        #   see the implementation of self.get_average
+        #
+        ##########################################################################################
+
+        # This array is used for expectation value calculation
+        self._tmp = gpuarray.empty_like(self.rho)
+
+        # hash table of cuda compiled functions that calculate an average of specified observable
+        self._compiled_observable = dict()
+
+        # Create the plan for FFT/iFFT for axis 1
+        self.plan_Z2Z_ax1 = cufft.Plan_Z2Z_2D_Axis1(self.rho.shape)
+
+        # Array for extracting the diagonal
+        self._diag = gpuarray.GPUArray(self.X.size, np.complex128)
+
+        # Compile the CUDA code to extract the diagonal
+        self.get_diag = SourceModule(
+            self.extract_diagonal_cuda_source.format(X_gridDIM=self.X_gridDIM)
+        ).get_function("Kernel")
+
+        ##########################################################################################
+        #
+        #   Ehrenfest theorems (optional)
+        #
+        ##########################################################################################
+
+        try:
+            # Check whether the necessary terms are specified to calculate the Ehrenfest theorems
+            self.diff_K
+            self.diff_V
+
+            # Lists where the expectation values of X and P
+            self.X_average = []
+            self.P_average = []
+
+            # Lists where the right hand sides of the Ehrenfest theorems for X and P
+            self.X_average_RHS = []
+            self.P_average_RHS = []
+
+            # List where the expectation value of the Hamiltonian will be calculated
+            self.hamiltonian_average = []
+
+            # Flag requesting tha the Ehrenfest theorem calculations
+            self.isEhrenfest = True
+
+        except AttributeError:
+            # Since self.diff_V and self.diff_K are not specified,
+            # the Ehrenfest theorem will not be calculated
+            self.isEhrenfest = False
+
+        self.print_memory_info()
+
+    @classmethod
+    def print_memory_info(cls):
+        """
+        Print the CUDA memory info
+        :return:
+        """
+        print(
+            "\n\n\t\tGPU memory Total %.2f GB\n\t\tGPU memory Free %.2f GB\n" % \
+            tuple(np.array(pycuda.driver.mem_get_info()) / 2. ** 30)
+        )
+
+    def x2p_transform(self):
+        """
+        The x -> p transform
+        :return:
+        """
+        cufft.fft_Z2Z(self.rho, self.rho_p, self.plan_Z2Z)
+
+    def p2x_transform(self):
+        """
+        The p -> x transform
+        :return:
+        """
+        cufft.ifft_Z2Z(self.rho_p, self.rho, self.plan_Z2Z)
+
+    def set_rho(self, new_rho):
+        """
+        Set the initial Wigner function
+        :param new_rho: 2D numpy array, 2D GPU array contaning the density matrix,
+                    a string of the C code specifying the initial condition in the coordinate representation,
+                    a python function of the form F(self, X, X_prime), or a float number
+                    Coordinate variables X and X_prime are declared.
+        :return: self
+        """
+        if isinstance(new_rho, (np.ndarray, gpuarray.GPUArray)):
+            # perform the consistency checks
+            assert new_rho.shape == self.rho.shape, \
+                "The grid sizes does not match with the density matrix"
+
+            # copy the density matrix
+            self.rho[:] = new_rho
+
+        elif isinstance(new_rho, FunctionType):
+            # user supplied the function which will return the density matrix
+            self.rho[:] = new_rho(self, self.X[:,np.newaxis], self.X[np.newaxis,:])
+
+        elif isinstance(new_rho, str):
+            # user specified C code
+            print("\n================================ Compiling init_rho ================================\n")
+            SourceModule(
+                self.init_rho_cuda_source.format(cuda_consts=self.cuda_consts, new_rho=new_rho)
+            ).get_function("Kernel")(self.rho, **self.rho_mapper_params)
+
+        elif isinstance(new_rho, float):
+            # user specified a constant
+            self.rho.fill(np.complex128(new_rho))
+        else:
+            raise NotImplementedError("new_rho must be either function or numpy.array")
+
+        # normalize
+        self.rho /= self.trace(self.rho) * self.dX
+
+        return self
+
+    def single_step_propagation(self):
+        """
+        Perform a single step propagation. The final density matrix function is not normalized.
+        :return: self.rho
+        """
+        #print self.trace(self.rho)
+        self.expV(self.rho, self.t, **self.rho_mapper_params)
+        #print self.trace(self.rho)
+
+        self.x2p_transform()
+        #print self.trace(self.rho)
+        self.expK(self.rho_p, self.t, **self.rho_mapper_params)
+        self.p2x_transform()
+
+        self.expV(self.rho, self.t, **self.rho_mapper_params)
+
+        return self.rho
+
+    def propagate(self, steps=1):
+        """
+        Time propagate the density matrix saved in self.rho
+        :param steps: number of self.dt time increments to make
+        :return: self.rho
+        """
+        for _ in xrange(steps):
+            # increment current time
+            self.t += self.dt
+
+            # advance by one time step
+            self.single_step_propagation()
+
+            # normalization
+            self.rho /= self.trace(self.rho) * self.dX
+
+            # calculate the Ehrenfest theorems
+            self.get_Ehrenfest(self.t)
+
+        return self.rho
+
+    def get_Ehrenfest(self, t):
+        """
+        Calculate observables entering the Ehrenfest theorems at time
+        :param t: current time
+        :return: coordinate and momentum densities, if the Ehrenfest theorems were calculated; otherwise, return None
+        """
+        if self.isEhrenfest:
+            # save the current value of <X>
+            self.X_average.append(
+                self.get_average(("X",))
+            )
+
+            # save the current value of <diff_K>
+            self.X_average_RHS.append(
+                self.get_average((None, self.diff_K))
+            )
+
+            # save the current value of <P>
+            self.P_average.append(
+                self.get_average((None, "P"))
+            )
+
+            # save the current value of <-diff_V>
+            self.P_average_RHS.append(
+                -self.get_average((self.diff_V,))
+            )
+
+            # save the current expectation value of energy
+            self.hamiltonian_average.append(
+                self.get_average((None, self.K)) + self.get_average((self.V,))
+            )
+
+    def get_observable(self, observable_str):
+        """
+        Return the compiled observable
+        :param observable_str: (str)
+        :return: float
+        """
+        # Compile the corresponding cuda functions, if it has not been done
+        try:
+            func = self._compiled_observable[observable_str]
+        except KeyError:
+            print("\n============================== Compiling [%s] ==============================\n" % observable_str)
+            func = self._compiled_observable[observable_str] = SourceModule(
+                self.apply_observable_cuda_source.format(cuda_consts=self.cuda_consts, func=observable_str),
+            ).get_function("Kernel")
+
+        return func
+
+    def get_average(self, observable):
+        """
+        Return the expectation value of an observable.
+            observable = (coordinate obs, momentum obs, coordinate obs, momentum obs, ...)
+
+        Example 1:
+            To calculate Tr[ F2(X) g1(p) F1(x) rho ], we use observable = ("F1(x)", "g1(p)", "F2(X)")
+
+        Example 2:
+            To calculate Tr[ F(X) g(p) rho ], we use observable = (None, "g(p)", "F(X)")
+
+        :param observable: tuple of strings
+        :return: float
+        """
+
+        # Boolean flag indicated the representation
+        is_x_observal = True
+
+        # Make a copy of the density matrix
+        gpuarray._memcpy_discontig(self._tmp, self.rho)
+
+        for obs_str in observable[::-1]:
+            if is_x_observal:
+                # Apply observable in the coordinate representation
+                self.get_observable(obs_str)(self._tmp, self.t, **self.rho_mapper_params)
+            else:
+                # Going to the momentum representation
+                cufft.fft_Z2Z(self._tmp, self.rho_p, self.plan_Z2Z_ax1)
+
+                # Apply observable in the momentum representation
+                self.get_observable(obs_str)(self.rho_p, self.t, **self.rho_mapper_params)
+
+                # Going back to the coordinate representation
+                cufft.ifft_Z2Z(self.rho_p, self._tmp, self.plan_Z2Z_ax1)
+
+            is_x_observal = not is_x_observal
+
+        return self.trace(self._tmp) * self.dX
+
+    def trace(self, rho):
+        """
+        Calculate the trace of a matrix rho
+        :param rho: 2D gpuarray
+        :return: complex
+        """
+        self.get_diag(rho, self._diag, **self.diag_mapper_params)
+        return gpuarray.sum(self._diag).get()
+
+    expK_expV_cuda_source = """
+    #include<pycuda-complex.hpp>
+    #include<math.h>
+    #define _USE_MATH_DEFINES
+
+    typedef pycuda::complex<double> cuda_complex;
+
+    {cuda_consts}
+
+    // Kinetic energy
+    __device__ double K(double P, double t)
+    {{
+        return ({K});
+    }}
+
+    // Potential energy
+    __device__ double V(double X, double t)
+    {{
+        return ({V});
+    }}
+
+    ////////////////////////////////////////////////////////////////////////////
+    //
+    // CUDA code to define the action of the kinetic energy exponent
+    // onto the density matrix in the momentum representation < P | rho | P_prime >
+    //
+    ////////////////////////////////////////////////////////////////////////////
+
+    __global__ void expK(cuda_complex *rho, double t)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        const double P = dP * (j - 0.5 * X_gridDIM);
+        const double P_prime = dP * (i - 0.5 * X_gridDIM);
+
+        const double phase = -dt * (K(P, t) - K(P_prime, t));
+
+        rho[indexTotal] *= cuda_complex(cos(phase), sin(phase)) * ({abs_boundary_p});
+    }}
+
+    ////////////////////////////////////////////////////////////////////////////
+    //
+    // CUDA code to define the action of the potential energy exponent
+    // onto the density matrix in the coordinate representation < X | rho | X_prime >
+    //
+    ////////////////////////////////////////////////////////////////////////////
+
+    __global__ void expV(cuda_complex *rho, double t)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        const double X = dX * (j - 0.5 * X_gridDIM);
+        const double X_prime = dX * (i - 0.5 * X_gridDIM);
+
+        const double phase = -0.5 * dt * (V(X, t) - V(X_prime, t));
+
+        rho[indexTotal] *= cuda_complex(cos(phase), sin(phase)) * ({abs_boundary_x});
+    }}
+    """
+
+    init_rho_cuda_source = """
+    // CUDA code to initialize the densiy matrix in the coordinate representation
+    #include<pycuda-complex.hpp>
+    #include<math.h>
+    #define _USE_MATH_DEFINES
+
+    typedef pycuda::complex<double> cuda_complex;
+
+    {cuda_consts}
+
+    __global__ void Kernel(cuda_complex *rho)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        const double X = dX * (j - 0.5 * X_gridDIM);
+        const double X_prime = dX * (i - 0.5 * X_gridDIM);
+
+        rho[indexTotal] = ({new_rho});
+    }}
+    """
+
+    apply_observable_cuda_source = """
+    #include<pycuda-complex.hpp>
+    #include<math.h>
+    #define _USE_MATH_DEFINES
+
+    typedef pycuda::complex<double> cuda_complex;
+
+    {cuda_consts}
+
+    ////////////////////////////////////////////////////////////////////////////
+    //
+    // CUDA code to apply the observable onto the density function
+    //
+    ////////////////////////////////////////////////////////////////////////////
+
+    __global__ void Kernel(cuda_complex *rho, double t)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        const double P = dP * (j - 0.5 * X_gridDIM);
+        const double X = dX * (j - 0.5 * X_gridDIM);
+
+        rho[indexTotal] *= ({observable});
+    }}
+    """
+
+    extract_diagonal_cuda_source = """
+    #include<pycuda-complex.hpp>
+    #include<math.h>
+    #define _USE_MATH_DEFINES
+
+    typedef pycuda::complex<double> cuda_complex;
+
+    ////////////////////////////////////////////////////////////////////////////
+    //
+    // CUDA code to extract the diagonal
+    //
+    ////////////////////////////////////////////////////////////////////////////
+
+    __global__ void Kernel(const cuda_complex *rho, cuda_complex *diag)
+    {{
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + j * {X_gridDIM};
+
+        diag[j] = rho[indexTotal];
+    }}
+    """
+
+##########################################################################################
+#
+# Example
+#
+##########################################################################################
+
+if __name__ == '__main__':
+
+    print(RhoVNeumannCUDA1D.__doc__)
+
+    # load tools for creating animation
+    import sys
+    import matplotlib
+
+    if sys.platform == 'darwin':
+        # only for MacOS
+        matplotlib.use('TKAgg')
+
+    import matplotlib.animation
+    import matplotlib.pyplot as plt
+
+    class VisualizeDynamicsPhaseSpace:
+        """
+        Class to visualize the Wigner function function dynamics in phase space.
+        """
+        def __init__(self, fig):
+            """
+            Initialize all propagators and frame
+            :param fig: matplotlib figure object
+            """
+            #  Initialize systems
+            self.set_quantum_sys()
+
+            #################################################################
+            #
+            # Initialize plotting facility
+            #
+            #################################################################
+
+            self.fig = fig
+
+            ax = fig.add_subplot(111)
+
+            ax.set_title('Wigner function, $W(x,p,t)$')
+            extent = [self.quant_sys.X.min(), self.quant_sys.X.max(), self.quant_sys.X.min(), self.quant_sys.X.max()]
+
+            # import utility to visualize the wigner function
+            from wigner_normalize import WignerNormalize
+
+            # generate empty plot
+            self.img = ax.imshow(
+                [[]],
+                extent=extent,
+                origin='lower',
+                cmap='seismic',
+                norm=WignerNormalize(vmin=-0.01, vmax=0.1)
+            )
+
+            self.fig.colorbar(self.img)
+
+            ax.set_xlabel('$x$ (a.u.)')
+            ax.set_ylabel('$p$ (a.u.)')
+
+        def set_quantum_sys(self):
+            """
+            Initialize quantum propagator
+            :param self:
+            :return:
+            """
+            # Create propagator
+            self.quant_sys = RhoVNeumannCUDA1D(
+                t=0.,
+                dt=0.01,
+                X_gridDIM=1024,
+                X_amplitude=10.,
+
+                # randomized parameter
+                omega_square=np.random.uniform(2., 6.),
+
+                # randomized parameters for initial condition
+                sigma=np.random.uniform(0.5, 4.),
+                p0=np.random.uniform(-1., 1.),
+                x0=np.random.uniform(-1., 1.),
+
+                # smoothing parameter for absorbing boundary
+                #alpha=0.01,
+
+                # kinetic energy part of the hamiltonian
+                K="0.5 * P * P",
+
+                # potential energy part of the hamiltonian
+                V="0.5 * omega_square * X * X",
+
+                # these functions are used for evaluating the Ehrenfest theorems
+                diff_K="P",
+                diff_V="omega_square * X"
+            )
+
+            # set randomised initial condition
+            self.quant_sys.set_rho(
+                "exp("
+                "   -sigma *( pow(X - x0, 2) + pow(X_prime - x0, 2) ) "
+                ")"
+            )
+
+        def empty_frame(self):
+            """
+            Make empty frame and reinitialize quantum system
+            :param self:
+            :return: image object
+            """
+            self.img.set_array([[]])
+            return self.img,
+
+        def __call__(self, frame_num):
+            """
+            Draw a new frame
+            :param frame_num: current frame number
+            :return: image objects
+            """
+            # propagate the wigner function
+            self.img.set_array(self.quant_sys.propagate(50).get().real)
+            return self.img,
+
+
+    fig = plt.gcf()
+    visualizer = VisualizeDynamicsPhaseSpace(fig)
+    animation = matplotlib.animation.FuncAnimation(
+        fig, visualizer, frames=np.arange(100), init_func=visualizer.empty_frame, repeat=True, blit=True
+    )
+
+    plt.show()
+
+    # extract the reference to quantum system
+    quant_sys = visualizer.quant_sys
+
+    # Analyze how well the energy was preserved
+    h = np.array(quant_sys.hamiltonian_average)
+    print(
+        "\nHamiltonian is preserved within the accuracy of %f percent" % ((1. - h.min() / h.max()) * 100)
+    )
+
+    #################################################################
+    #
+    # Plot the Ehrenfest theorems after the animation is over
+    #
+    #################################################################
+
+    # generate time step grid
+    dt = quant_sys.dt
+    times = dt * np.arange(len(quant_sys.X_average)) + dt
+
+    plt.subplot(131)
+    plt.title("The first Ehrenfest theorem verification")
+
+    plt.plot(times, np.gradient(quant_sys.X_average, dt), 'r-', label='$d\\langle x \\rangle/dt$')
+    plt.plot(times, quant_sys.X_average_RHS, 'b--', label='$\\langle p \\rangle$')
+
+    plt.legend()
+    plt.xlabel('time $t$ (a.u.)')
+
+    plt.subplot(132)
+    plt.title("The second Ehrenfest theorem verification")
+
+    plt.plot(times, np.gradient(quant_sys.P_average, dt), 'r-', label='$d\\langle p \\rangle/dt$')
+    plt.plot(times, quant_sys.P_average_RHS, 'b--', label='$\\langle -\\partial V/\\partial x \\rangle$')
+
+    plt.legend()
+    plt.xlabel('time $t$ (a.u.)')
+
+    plt.subplot(133)
+    plt.title('Hamiltonian')
+    plt.plot(times, h)
+    plt.xlabel('time $t$ (a.u.)')
+
+    plt.show()

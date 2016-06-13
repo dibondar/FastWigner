@@ -114,6 +114,16 @@ def cufftPlanMany(rank, n, inembed, istride, idist, onembed, ostride, odist, fft
     return plan
 
 
+# Destroy Plan
+_libcufft.cufftDestroy.restype = int
+_libcufft.cufftDestroy.argtypes = [ctypes.c_uint]
+
+
+def cufftDestroy(plan):
+    """Destroy FFT plan."""
+    status = _libcufft.cufftDestroy(plan)
+    cufftCheckStatus(status)
+
 # double2complex FFT
 
 _libcufft.cufftExecD2Z.restype = int
@@ -127,8 +137,11 @@ def cu_fft_D2Z(x_input_gpu, y_output_gpu, plan):
 def cu_ifft_D2Z(x_input_gpu, y_output_gpu, plan):
     _libcufft.cufftExecD2Z(plan.handle, int(x_input_gpu.gpudata), int(y_output_gpu.gpudata), CUFFT_INVERSE)
 
-
+##################################################################################
+#
 # complex2double FFT
+#
+##################################################################################
 
 _libcufft.cufftExecZ2D.restype = int
 _libcufft.cufftExecZ2D.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
@@ -170,7 +183,7 @@ class Plan2DAxis0:
 
     def __del__(self):
         try:
-            _libcufft.cufftDestroy(self.handle)
+            cufftDestroy(self.handle)
         except:
             pass
 
@@ -188,14 +201,107 @@ class Plan2DAxis1:
 
             rank = 1
             self.handle = cufftPlanMany(
-                rank, n.ctypes.data, None, 1, 0,
-                None, 1, 0, self.fft_type, self.batch
+                rank, n.ctypes.data, None, 1, 0, None, 1, 0, self.fft_type, self.batch
             )
         else:
             raise ValueError('invalid transform dimension')
 
     def __del__(self):
         try:
-            _libcufft.cufftDestroy(self.handle)
+            cufftDestroy(self.handle)
+        except:
+            pass
+
+##################################################################################
+#
+# complex 2 complex fft
+#
+##################################################################################
+
+# Execution
+_libcufft.cufftExecZ2Z.restype = int
+_libcufft.cufftExecZ2Z.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+
+
+def cufftExecZ2Z(plan, idata, odata, direction):
+    """Execute double precision complex-to-complex transform plan as
+    specified by `direction`."""
+    status = _libcufft.cufftExecZ2Z(plan, idata, odata, direction)
+    cufftCheckStatus(status)
+
+
+def fft_Z2Z(x_input_gpu, y_output_gpu, plan):
+    cufftExecZ2Z(plan.handle, int(x_input_gpu.gpudata), int(y_output_gpu.gpudata), CUFFT_FORWARD)
+
+
+def ifft_Z2Z(x_input_gpu, y_output_gpu, plan):
+    cufftExecZ2Z(plan.handle, int(x_input_gpu.gpudata), int(y_output_gpu.gpudata), CUFFT_INVERSE)
+
+
+class PlanZ2Z:
+    """
+    CUFFT plan class.
+    This class represents an FFT  plan for CUFFT for complex double precission Z2Z
+    Parameters
+    ----------
+    shape : ntuple
+    batch : int
+        Number of FFTs to configure in parallel (default is 1).
+    """
+    def __init__(self, shape, batch=1):
+        self.shape = shape
+        self.batch = batch
+        self.fft_type = CUFFT_Z2Z
+
+        if len(self.shape) > 0:
+            n = np.asarray(shape, np.int32)
+            rank = len(shape)
+            self.handle = cufftPlanMany(
+                rank, n.ctypes.data, None, 1, 0, None, 1, 0, self.fft_type, self.batch
+            )
+        else:
+            raise ValueError('invalid transform size')
+
+    def __del__(self):
+        # Don't complain if handle destruction fails because the plan
+        # may have already been cleaned up:
+        try:
+            cufftDestroy(self.handle)
+        except:
+            pass
+
+
+class Plan_Z2Z_2D_Axis1:
+    """
+    fft in axis 1 for a 2D array
+    Parameters
+    ----------
+    shape : ntuple of four elements
+    """
+    def __init__(self, shape):
+        self.batch = shape[0]
+        self.fft_type = CUFFT_Z2Z
+
+        if len(shape) == 2:
+            n = np.array([ shape[1] ])
+            stride = 1                  # distance jump between two elements in the same series
+            idist = shape[1]	    # distance jump between two consecutive batches
+
+            inembed = np.array( shape )
+            onembed = np.array( shape )
+
+            rank = 1
+            self.handle = cufftPlanMany(
+                rank, n.ctypes.data, inembed.ctypes.data, stride, idist,
+                onembed.ctypes.data, stride, idist, self.fft_type, self.batch
+            )
+        else:
+            raise ValueError('invalid transform dimension')
+
+    def __del__(self):
+        # Don't complain if handle destruction fails because the plan
+        # may have already been cleaned up:
+        try:
+            cufftDestroy(self.handle)
         except:
             pass
