@@ -195,7 +195,7 @@ class RhoVNeumannCUDA1D:
         #
         ##########################################################################################
 
-        self.plan_Z2Z = cufft.PlanZ2Z((self.X.size, self.X.size), cufft.CUFFT_Z2Z)
+        self.plan_Z2Z = cufft.PlanZ2Z((self.X.size, self.X.size))
 
         ##########################################################################################
         #
@@ -413,7 +413,7 @@ class RhoVNeumannCUDA1D:
         except KeyError:
             print("\n============================== Compiling [%s] ==============================\n" % observable_str)
             func = self._compiled_observable[observable_str] = SourceModule(
-                self.apply_observable_cuda_source.format(cuda_consts=self.cuda_consts, func=observable_str),
+                self.apply_observable_cuda_source.format(cuda_consts=self.cuda_consts, observable=observable_str),
             ).get_function("Kernel")
 
         return func
@@ -440,18 +440,19 @@ class RhoVNeumannCUDA1D:
         gpuarray._memcpy_discontig(self._tmp, self.rho)
 
         for obs_str in observable[::-1]:
-            if is_x_observal:
-                # Apply observable in the coordinate representation
-                self.get_observable(obs_str)(self._tmp, self.t, **self.rho_mapper_params)
-            else:
-                # Going to the momentum representation
-                cufft.fft_Z2Z(self._tmp, self.rho_p, self.plan_Z2Z_ax1)
+            if obs_str:
+                if is_x_observal:
+                    # Apply observable in the coordinate representation
+                    self.get_observable(obs_str)(self._tmp, self.t, **self.rho_mapper_params)
+                else:
+                    # Going to the momentum representation
+                    cufft.fft_Z2Z(self._tmp, self.rho_p, self.plan_Z2Z_ax1)
 
-                # Apply observable in the momentum representation
-                self.get_observable(obs_str)(self.rho_p, self.t, **self.rho_mapper_params)
+                    # Apply observable in the momentum representation
+                    self.get_observable(obs_str)(self.rho_p, self.t, **self.rho_mapper_params)
 
-                # Going back to the coordinate representation
-                cufft.ifft_Z2Z(self.rho_p, self._tmp, self.plan_Z2Z_ax1)
+                    # Going back to the coordinate representation
+                    cufft.ifft_Z2Z(self.rho_p, self._tmp, self.plan_Z2Z_ax1)
 
             is_x_observal = not is_x_observal
 
@@ -500,8 +501,8 @@ class RhoVNeumannCUDA1D:
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
-        const double P = dP * (j - 0.5 * X_gridDIM);
-        const double P_prime = dP * (i - 0.5 * X_gridDIM);
+        const double P = dP * ((j + X_gridDIM / 2) % X_gridDIM - X_gridDIM / 2);
+        const double P_prime = dP * ((i + X_gridDIM / 2) % X_gridDIM - X_gridDIM / 2);
 
         const double phase = -dt * (K(P, t) - K(P_prime, t));
 
@@ -574,7 +575,7 @@ class RhoVNeumannCUDA1D:
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
-        const double P = dP * (j - 0.5 * X_gridDIM);
+        const double P = dP * ((i + X_gridDIM / 2) % X_gridDIM - X_gridDIM / 2);
         const double X = dX * (j - 0.5 * X_gridDIM);
 
         rho[indexTotal] *= ({observable});
@@ -623,6 +624,8 @@ if __name__ == '__main__':
 
     import matplotlib.animation
     import matplotlib.pyplot as plt
+
+    np.random.seed(10)
 
     class VisualizeDynamicsPhaseSpace:
         """
@@ -683,7 +686,7 @@ if __name__ == '__main__':
                 omega_square=np.random.uniform(2., 6.),
 
                 # randomized parameters for initial condition
-                sigma=np.random.uniform(0.5, 4.),
+                sigma=np.random.uniform(2., 4.),
                 p0=np.random.uniform(-1., 1.),
                 x0=np.random.uniform(-1., 1.),
 
@@ -724,7 +727,7 @@ if __name__ == '__main__':
             :return: image objects
             """
             # propagate the wigner function
-            self.img.set_array(self.quant_sys.propagate(50).get().real)
+            self.img.set_array(np.abs(self.quant_sys.propagate(1).get()))
             return self.img,
 
 
