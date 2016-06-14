@@ -335,12 +335,9 @@ class RhoVNeumannCUDA1D:
         Perform a single step propagation. The final density matrix function is not normalized.
         :return: self.rho
         """
-        #print self.trace(self.rho)
         self.expV(self.rho, self.t, **self.rho_mapper_params)
-        #print self.trace(self.rho)
 
         self.x2p_transform()
-        #print self.trace(self.rho)
         self.expK(self.rho_p, self.t, **self.rho_mapper_params)
         self.p2x_transform()
 
@@ -424,29 +421,34 @@ class RhoVNeumannCUDA1D:
             observable = (coordinate obs, momentum obs, coordinate obs, momentum obs, ...)
 
         Example 1:
-            To calculate Tr[ F2(X) g1(p) F1(x) rho ], we use observable = ("F1(x)", "g1(p)", "F2(X)")
+            To calculate Tr[rho F1(x) g1(p) F2(X)], we use observable = ("F1(x)", "g1(p)", "F2(X)")
 
         Example 2:
-            To calculate Tr[ F(X) g(p) rho ], we use observable = (None, "g(p)", "F(X)")
+            To calculate Tr[rho g(p) F(X)], we use observable = (None, "g(p)", "F(X)")
 
         :param observable: tuple of strings
         :return: float
         """
 
         # Boolean flag indicated the representation
-        is_x_observal = True
+        is_x_observable = False
 
         # Make a copy of the density matrix
         gpuarray._memcpy_discontig(self._tmp, self.rho)
 
-        for obs_str in observable[::-1]:
+        for obs_str in observable:
+            is_x_observable = not is_x_observable
+
             if obs_str:
-                if is_x_observal:
+                if is_x_observable:
                     # Apply observable in the coordinate representation
                     self.get_observable(obs_str)(self._tmp, self.t, **self.rho_mapper_params)
                 else:
                     # Going to the momentum representation
                     cufft.fft_Z2Z(self._tmp, self.rho_p, self.plan_Z2Z_ax1)
+
+                    # Normalize
+                    self.rho_p /= self.rho_p.shape[1]
 
                     # Apply observable in the momentum representation
                     self.get_observable(obs_str)(self.rho_p, self.t, **self.rho_mapper_params)
@@ -454,9 +456,8 @@ class RhoVNeumannCUDA1D:
                     # Going back to the coordinate representation
                     cufft.ifft_Z2Z(self.rho_p, self._tmp, self.plan_Z2Z_ax1)
 
-            is_x_observal = not is_x_observal
+        return np.real(self.trace(self._tmp) * self.dX)
 
-        return self.trace(self._tmp) * self.dX
 
     def trace(self, rho):
         """
@@ -501,8 +502,9 @@ class RhoVNeumannCUDA1D:
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
-        const double P = dP * ((j + X_gridDIM / 2) % X_gridDIM - X_gridDIM / 2);
-        const double P_prime = dP * ((i + X_gridDIM / 2) % X_gridDIM - X_gridDIM / 2);
+        // fft shifting momentum
+        const double P = dP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
+        const double P_prime = dP * ((i + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
 
         const double phase = -dt * (K(P, t) - K(P_prime, t));
 
@@ -575,7 +577,7 @@ class RhoVNeumannCUDA1D:
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
-        const double P = dP * ((i + X_gridDIM / 2) % X_gridDIM - X_gridDIM / 2);
+        const double P = dP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
         const double X = dX * (j - 0.5 * X_gridDIM);
 
         rho[indexTotal] *= ({observable});
@@ -624,8 +626,6 @@ if __name__ == '__main__':
 
     import matplotlib.animation
     import matplotlib.pyplot as plt
-
-    np.random.seed(10)
 
     class VisualizeDynamicsPhaseSpace:
         """
@@ -727,7 +727,8 @@ if __name__ == '__main__':
             :return: image objects
             """
             # propagate the wigner function
-            self.img.set_array(np.abs(self.quant_sys.propagate(1).get()))
+            self.img.set_array(np.abs(self.quant_sys.propagate(50).get()))
+
             return self.img,
 
 

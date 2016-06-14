@@ -271,6 +271,42 @@ class PlanZ2Z:
             pass
 
 
+class Plan_Z2Z_2D_Axis0:
+    """
+    fft in axis 0 for a 2D array
+    Parameters
+    ----------
+    shape : ntuple of four elements
+    """
+    def __init__(self, shape):
+        self.batch = shape[1]
+        self.fft_type = CUFFT_Z2Z
+
+        if len(shape) == 2:
+            n = np.array([ shape[0] ])
+            stride = shape[1]           # distance jump between two elements in the same series
+            idist  = 1                  # distance jump between two consecutive batches
+
+            inembed = np.array( [shape[0],stride] )
+            onembed = np.array( [shape[0],stride] )
+
+            rank = 1
+            self.handle = cufftPlanMany(
+                rank, n.ctypes.data, inembed.ctypes.data, stride,
+                idist, onembed.ctypes.data, stride, idist, self.fft_type, self.batch
+            )
+        else:
+            raise ValueError('invalid transform dimension')
+
+    def __del__(self):
+        # Don't complain if handle destruction fails because the plan
+        # may have already been cleaned up:
+        try:
+            cufftDestroy(self.handle)
+        except:
+            pass
+
+
 class Plan_Z2Z_2D_Axis1:
     """
     fft in axis 1 for a 2D array
