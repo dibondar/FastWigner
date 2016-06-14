@@ -6,6 +6,9 @@ from fractions import gcd
 from types import MethodType, FunctionType
 import cufft
 
+import skcuda.linalg as cu_linalg
+cu_linalg.init()
+
 
 class RhoVNeumannCUDA1D:
     """
@@ -226,14 +229,6 @@ class RhoVNeumannCUDA1D:
         # Create the plan for FFT/iFFT for axis 1
         self.plan_Z2Z_ax1 = cufft.Plan_Z2Z_2D_Axis1(self.rho.shape)
 
-        # Array for extracting the diagonal
-        self._diag = gpuarray.GPUArray(self.X.size, np.complex128)
-
-        # Compile the CUDA code to extract the diagonal
-        self.get_diag = SourceModule(
-            self.extract_diagonal_cuda_source.format(X_gridDIM=self.X_gridDIM)
-        ).get_function("Kernel")
-
         ##########################################################################################
         #
         #   Ehrenfest theorems (optional)
@@ -326,7 +321,7 @@ class RhoVNeumannCUDA1D:
             raise NotImplementedError("new_rho must be either function or numpy.array")
 
         # normalize
-        self.rho /= self.trace(self.rho) * self.dX
+        self.rho /= cu_linalg.trace(self.rho) * self.dX
 
         return self
 
@@ -359,7 +354,7 @@ class RhoVNeumannCUDA1D:
             self.single_step_propagation()
 
             # normalization
-            self.rho /= self.trace(self.rho) * self.dX
+            self.rho /= cu_linalg.trace(self.rho) * self.dX
 
             # calculate the Ehrenfest theorems
             self.get_Ehrenfest(self.t)
@@ -456,17 +451,7 @@ class RhoVNeumannCUDA1D:
                     # Going back to the coordinate representation
                     cufft.ifft_Z2Z(self.rho_p, self._tmp, self.plan_Z2Z_ax1)
 
-        return np.real(self.trace(self._tmp) * self.dX)
-
-
-    def trace(self, rho):
-        """
-        Calculate the trace of a matrix rho
-        :param rho: 2D gpuarray
-        :return: complex
-        """
-        self.get_diag(rho, self._diag, **self.diag_mapper_params)
-        return gpuarray.sum(self._diag).get()
+        return cu_linalg.trace(self._tmp).real * self.dX
 
     expK_expV_cuda_source = """
     #include<pycuda-complex.hpp>
@@ -584,28 +569,6 @@ class RhoVNeumannCUDA1D:
     }}
     """
 
-    extract_diagonal_cuda_source = """
-    #include<pycuda-complex.hpp>
-    #include<math.h>
-    #define _USE_MATH_DEFINES
-
-    typedef pycuda::complex<double> cuda_complex;
-
-    ////////////////////////////////////////////////////////////////////////////
-    //
-    // CUDA code to extract the diagonal
-    //
-    ////////////////////////////////////////////////////////////////////////////
-
-    __global__ void Kernel(const cuda_complex *rho, cuda_complex *diag)
-    {{
-        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
-        const size_t indexTotal = j + j * {X_gridDIM};
-
-        diag[j] = rho[indexTotal];
-    }}
-    """
-
 ##########################################################################################
 #
 # Example
@@ -689,9 +652,6 @@ if __name__ == '__main__':
                 sigma=np.random.uniform(2., 4.),
                 p0=np.random.uniform(-1., 1.),
                 x0=np.random.uniform(-1., 1.),
-
-                # smoothing parameter for absorbing boundary
-                #alpha=0.01,
 
                 # kinetic energy part of the hamiltonian
                 K="0.5 * P * P",
