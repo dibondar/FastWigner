@@ -492,11 +492,14 @@ class RhoVNeumannCUDA1D:
         )
         """
 
-        ###############################################################
+        ####################################################################################
         #
         # Step 1: Perform the 45 degree rotation of the density matrix
+        # using method from
+        #   K. G. Larkin,  M. A. Oldfield, H. Klemm, Optics Communications, 139, 99 (1997)
+        #   (http://www.sciencedirect.com/science/article/pii/S0030401897000977)
         #
-        ###############################################################
+        ####################################################################################
 
         # Shear X
         cufft.fft_Z2Z(self.rho, self._tmp, self.plan_Z2Z_ax1)
@@ -516,11 +519,14 @@ class RhoVNeumannCUDA1D:
         cufft.ifft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
         self._tmp /= self._tmp.shape[1]
 
-        ###############################################################
+        ####################################################################################
         #
         # Step 2: Perform the FFT over the roated matrix
+        # using method from
+        #   D. H. Bailey and P. N. Swarztrauber, SIAM J. Sci. Comput. 15, 1105 (1994)
+        #   (http://epubs.siam.org/doi/abs/10.1137/0915067)
         #
-        ###############################################################
+        ####################################################################################
 
         self.sign_flip(self._tmp, **self.rho_mapper_params)
         cufft.ifft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax0)
