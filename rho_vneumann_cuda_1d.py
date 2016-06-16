@@ -104,6 +104,9 @@ class RhoVNeumannCUDA1D:
 
         self.wigner_dxdp = (self.X_wigner[1] - self.X_wigner[0]) * (self.P_wigner[1] - self.P_wigner[0])
 
+        self.P_wigner = np.fft.fftshift(self.P_wigner)[:, np.newaxis]
+        self.X_wigner = self.X_wigner[np.newaxis, :]
+
         ##########################################################################################
         #
         # Save CUDA constants
@@ -456,6 +459,37 @@ class RhoVNeumannCUDA1D:
                     cufft.ifft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
 
         return cu_linalg.trace(self._tmp).real * self.dX
+
+    def get_purity(self):
+        """
+        Return the purity of the current density matrix Tr[rho**2]
+        :return: float
+        """
+        # If kernel calculating the purity is not present, compile it
+        try:
+            purity_kernel = self._purity_kernel
+        except AttributeError:
+            from pycuda.tools import dtype_to_ctype
+            from pycuda.reduction import ReductionKernel
+
+            purity_kernel = self._purity_kernel = ReductionKernel(
+                np.float64, neutral="0", reduce_expr="a + b",
+                map_expr="pow(abs(R[i]), 2)", arguments="const %s *R" % dtype_to_ctype(self.rho.dtype)
+            )
+
+        return purity_kernel(self.rho).get() * self.dX**2
+
+    def get_sigma_x_sigma_p(self):
+        """
+        Return the product of standard deviation of coordinate and momentum,
+        the LHS of the Heisenberg uncertainty principle:
+            sigma_p * sigma_p >= 0.5
+        :return: float
+        """
+        return np.sqrt(
+            (self.get_average(("X * X",)) - self.get_average(("X",))**2) *
+            (self.get_average((None, "P * P")) - self.get_average((None, "P"))**2)
+        )
 
     def get_wignerfunction(self):
         """

@@ -1,14 +1,15 @@
-from wigner_moyal_cuda_1d import WignerMoyalCUDA1D
+from rho_vneumann_cuda_1d import RhoVNeumannCUDA1D
 
+import skcuda.linalg as cu_linalg
 import pycuda.gpuarray as gpuarray
 from pycuda.compiler import SourceModule
 import numpy as np
 
 
-class WignerBlochCUDA1D(WignerMoyalCUDA1D):
+class RhoBlochCUDA1D(RhoVNeumannCUDA1D):
     """
-    Find the Wigner function of the Boltzmann-Gibbs canonical state [rho = exp(-H/kT)]
-    by second-order split-operator propagation of the Bloch equation in phase space using CUDA.
+    Find the density matrix of the Boltzmann-Gibbs canonical state [rho = exp(-H/kT)]
+    by second-order split-operator propagation of the Bloch equation using CUDA.
     The Hamiltonian should be of the form H = K(p) + V(x).
 
     This implementation is based on the algorithm described in
@@ -17,9 +18,9 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
     """
     def __init__(self, **kwargs):
         """
-        In addition to kwagrs of WignerMoyalCUDA1D.__init__ this constructor accepts:
+        In addition to kwagrs of RhoVNeumannCUDA1D.__init__ this constructor accepts:
 
-        kT (optional)- the temperature for the Gibbs state [rho = exp(-H/kT)]
+        kT (optional)- the temperature for the Gibbs state [rho = exp(-H/kT)] (default is kT = 0)
         dbeta (optional) -  inverse temperature increments for the split-operator propagation
         t_initial (optional) - if the Hamiltonian is time dependent, then the the Gibbs state will be calculated
             for the hamiltonian at t_initial (default value of zero).
@@ -48,7 +49,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
             kwargs.update(dt=self.dbeta)
 
         # Initialize parent class
-        WignerMoyalCUDA1D.__init__(self, **kwargs)
+        RhoVNeumannCUDA1D.__init__(self, **kwargs)
 
         # Save the minimums of the potential (V) and kinetic (K) energy
         self.cuda_consts += "    const double V_min = %.15e;\n" % self.get_V_min()
@@ -59,47 +60,42 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         bloch_expK_expV_compiled = SourceModule(
             self.bloch_expK_expV_cuda_source.format(
                 cuda_consts=self.cuda_consts, K=self.K, V=self.V,
-                abs_boundary_lambda_p=self.abs_boundary_lambda_p, abs_boundary_x_theta=self.abs_boundary_x_theta
+                abs_boundary_p=self.abs_boundary_p, abs_boundary_x=self.abs_boundary_x
             )
         )
 
-        self.bloch_expK_bulk = bloch_expK_expV_compiled.get_function("bloch_expK_bulk")
-        self.bloch_expK_boundary = bloch_expK_expV_compiled.get_function("bloch_expK_boundary")
-
-        self.bloch_expV_bulk = bloch_expK_expV_compiled.get_function("bloch_expV_bulk")
-        self.bloch_expV_boundary = bloch_expK_expV_compiled.get_function("bloch_expV_boundary")
+        self.bloch_expK = bloch_expK_expV_compiled.get_function("bloch_expK")
+        self.bloch_expV = bloch_expK_expV_compiled.get_function("bloch_expV")
 
     def get_V_min(self):
         """
-        Return the potential energy minimum in the x theta space
+        Return the potential energy minimum
         """
         # allocate memory
-        v_theta_x = gpuarray.zeros((self.Theta.size, self.X.size), np.float64)
+        v_x_x_prime = gpuarray.zeros((self.X.size, self.X.size), np.float64)
 
         # fill array with values of the potential energy
         fill_compiled = SourceModule(
             self.fill_V_K.format(cuda_consts=self.cuda_consts, K=self.K, V=self.V)
         )
-        fill_compiled.get_function("fill_V_bulk")(v_theta_x, **self.V_bulk_mapper_params)
-        fill_compiled.get_function("fill_V_boundary")(v_theta_x, **self.V_boundary_mapper_params)
+        fill_compiled.get_function("fill_V")(v_x_x_prime, **self.rho_mapper_params)
 
-        return gpuarray.min(v_theta_x).get()
+        return gpuarray.min(v_x_x_prime).get()
 
     def get_K_min(self):
         """
-        Return the kinetic energy minimum in the lambda p space
+        Return the kinetic energy minimum
         """
         # allocate memory
-        k_p_lambda = gpuarray.zeros((self.P.size, self.Lambda.size), np.float64)
+        k_p_p_prime = gpuarray.zeros((self.P.size, self.P.size), np.float64)
 
         # fill array with values of the kinetic energy
         fill_compiled = SourceModule(
             self.fill_V_K.format(cuda_consts=self.cuda_consts, K=self.K, V=self.V)
         )
-        fill_compiled.get_function("fill_K_bulk")(k_p_lambda, **self.K_bulk_mapper_params)
-        fill_compiled.get_function("fill_K_boundary")(k_p_lambda, **self.K_boundary_mapper_params)
+        fill_compiled.get_function("fill_K")(k_p_p_prime, **self.rho_mapper_params)
 
-        return gpuarray.min(k_p_lambda).get()
+        return gpuarray.min(k_p_p_prime).get()
 
     @classmethod
     def get_dbeta_num_beta_steps(cls, kT, dbeta):
@@ -128,10 +124,10 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
 
     def get_gibbs_state(self, kT=None, dbeta=None):
         """
-        Calculate the Boltzmann-Gibbs state and save it in self.wignerfunction
+        Calculate the Boltzmann-Gibbs state in self.rho
         :param dbeta: (float) the inverse temperature step increment
-        :param kT: (float) temperature of the desired Gibbs state
-        :return: self.wignerfunction
+        :param abs_tol_purity: (float) the termination criterion for the obtained density matrix
+        :return: self.rho
         """
         # initialize the propagation parameters
         if dbeta is None:
@@ -143,8 +139,8 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         dbeta, num_beta_steps = self.get_dbeta_num_beta_steps(kT, dbeta)
         dbeta = np.float64(dbeta)
 
-        # Set the infinite temperature initial state
-        self.set_wignerfunction(1. / np.prod(self.wignerfunction.shape))
+        # Set the infinite temperature initial state (the delta function)
+        self.set_rho("double(i == j)")
 
         try:
             for k in xrange(num_beta_steps):
@@ -162,14 +158,14 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
                 "Current kT = %.6f" % (self.get_purity(), 1 / (k * dbeta))
             )
 
-        return self.wignerfunction
+        return self.rho
 
     def get_ground_state(self, dbeta=None, abs_tol_purity=1e-12):
         """
-        Obtain the ground state Wigner function with specified accuracy
+        Obtain the ground state density matrix with specified accuracy
         :param dbeta: (float) the inverse temperature step increment
-        :param abs_tol_purity: (float) the obtained Wigner function the termination criterion
-        :return: self.wignerfunction
+        :param abs_tol_purity: (float) the termination criterion for the obtained density matrix
+        :return: self.rho
         """
         # Initialize varaibles
         previous_energy = current_energy = np.inf
@@ -179,11 +175,11 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
             dbeta = self.dbeta
         dbeta = np.float64(dbeta)
 
-        # Set the infinite temperature initial state
-        self.set_wignerfunction(1. / np.prod(self.wignerfunction.shape))
+        # Set the infinite temperature initial state (the delta function)
+        self.set_rho("double(i == j)")
 
-        # Allocate memory for extra copy of the Wigner function
-        previous_wigner_function = self.wignerfunction.copy()
+        # Allocate memory for extra copy of the density matrix
+        previous_rho= self.rho.copy()
 
         while current_purity < (1. - abs_tol_purity) and dbeta > 1e-12:
             # advance by one time step
@@ -195,7 +191,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
                 assert current_purity <= 1.
 
                 # Check whether the state cooled
-                current_energy = self.get_average(self.hamiltonian)
+                current_energy = self.get_average((None, self.K)) + self.get_average((self.V,))
                 assert current_energy < previous_energy
 
                 # Verify the uncertainty principle
@@ -206,7 +202,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
                 previous_purity = current_purity
 
                 # make a copy of the current state
-                gpuarray._memcpy_discontig(previous_wigner_function, self.wignerfunction)
+                gpuarray._memcpy_discontig(previous_rho, self.rho)
 
                 print(
                     "Current energy: %.5f; purity: 1 - %.2e; dbeta: %.2e"
@@ -215,7 +211,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
             except AssertionError:
                 # the current state is unphysical,
                 # revert the propagation
-                gpuarray._memcpy_discontig(self.wignerfunction, previous_wigner_function)
+                gpuarray._memcpy_discontig(self.rho, previous_rho)
 
                 # and half the step size
                 dbeta *= 0.5
@@ -224,42 +220,28 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
                 current_energy = previous_energy
                 current_purity = previous_purity
 
-        return self.wignerfunction
+        return self.rho
 
     def bloch_single_step_propagation(self, dbeta):
         """
         Perform a single step propagation with respect to the inverse temperature via the Bloch equation.
-        The final Wigner function is not normalized.
         :param dbeta: (float) the inverse temperature step size
-        :return: self.wignerfunction
+        :return: self.rho
         """
-        self.p2theta_transform()
-        self.bloch_expV_bulk(self.wigner_theta_x, dbeta, **self.V_bulk_mapper_params)
-        self.bloch_expV_boundary(self.wigner_theta_x, dbeta, **self.V_boundary_mapper_params)
-        self.theta2p_transform()
+        self.bloch_expV(self.rho, dbeta, **self.rho_mapper_params)
 
-        self.x2lambda_transform()
-        self.bloch_expK_bulk(self.wigner_p_lambda, dbeta, **self.K_bulk_mapper_params)
-        self.bloch_expK_boundary(self.wigner_p_lambda, dbeta, **self.K_boundary_mapper_params)
-        self.lambda2x_transform()
+        self.x2p_transform()
+        self.bloch_expK(self.rho, dbeta, **self.rho_mapper_params)
+        self.p2x_transform()
 
-        self.p2theta_transform()
-        self.bloch_expV_bulk(self.wigner_theta_x, dbeta, **self.V_bulk_mapper_params)
-        self.bloch_expV_boundary(self.wigner_theta_x, dbeta, **self.V_boundary_mapper_params)
-        self.theta2p_transform()
+        self.bloch_expV(self.rho, dbeta, **self.rho_mapper_params)
 
         # normalize
-        self.wignerfunction /= gpuarray.sum(self.wignerfunction).get() * self.dXdP
+        self.rho /= cu_linalg.trace(self.rho) * self.dX
 
-        return self.wignerfunction
+        return self.rho
 
     bloch_expK_expV_cuda_source = """
-    /////////////////////////////////////////////////////////////////////////////
-    //
-    // This code closely follows WignerMoyalCUDA1D.expK_cuda_source
-    //
-    /////////////////////////////////////////////////////////////////////////////
-
     #include<pycuda-complex.hpp>
     #include<math.h>
     #define _USE_MATH_DEFINES
@@ -283,93 +265,56 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
     ////////////////////////////////////////////////////////////////////////////
     //
     // CUDA code to define the action of the kinetic energy exponent
-    // onto the wigner function in P Lambda representation
+    // onto the density matrix in the momentum representation < P | rho | P_prime >
     //
     ////////////////////////////////////////////////////////////////////////////
 
-    __global__ void bloch_expK_bulk(cuda_complex *Z, double dbeta)
+    __global__ void bloch_expK(cuda_complex *rho, double dbeta)
     {{
         const size_t i = blockIdx.y;
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
-        const size_t indexTotal = j  + i * (X_gridDIM / 2 + 1);
+        const size_t indexTotal = j + i * X_gridDIM;
 
-        const double Lambda = dLambda * j;
-        const double P = dP * (i - 0.5 * P_gridDIM);
-
-        const double phase = -0.5 * dbeta * (
-            K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial) - K_min
-        );
-
-        Z[indexTotal] *= exp(phase); // * ({abs_boundary_lambda_p});
-    }}
-
-    __global__ void bloch_expK_boundary(cuda_complex *Z, double dbeta)
-    {{
-        const size_t i = threadIdx.x + blockDim.x * blockIdx.x;
-        const size_t j = X_gridDIM / 2;
-        const size_t indexTotal = j  + i * (X_gridDIM / 2 + 1);
-
-        const double Lambda = dLambda * j;
-        const double P = dP * (i - 0.5 * P_gridDIM);
+        // fft shifting momentum
+        const double P = dP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
+        const double P_prime = dP * ((i + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
 
         const double phase = -0.5 * dbeta * (
-            K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial) - K_min
+            K(P, t_initial) + K(P_prime, t_initial) - K_min
         );
 
-        Z[indexTotal] *= exp(phase); // * ({abs_boundary_lambda_p});
+        rho[indexTotal] *= exp(phase); // * ({abs_boundary_p});
     }}
 
     ////////////////////////////////////////////////////////////////////////////
     //
     // CUDA code to define the action of the potential energy exponent
-    // onto the wigner function in Theta X representation
+    // onto the density matrix in the coordinate representation < X | rho | X_prime >
     //
     ////////////////////////////////////////////////////////////////////////////
 
-    __global__ void bloch_expV_bulk(cuda_complex *Z, double dbeta)
+    __global__ void bloch_expV(cuda_complex *rho, double dbeta)
     {{
         const size_t i = blockIdx.y;
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
         const double X = dX * (j - 0.5 * X_gridDIM);
-        const double Theta = dTheta * i;
+        const double X_prime = dX * (i - 0.5 * X_gridDIM);
 
         const double phase = -0.25 * dbeta * (
-            V(X - 0.5 * Theta, t_initial) + V(X + 0.5 * Theta, t_initial) - V_min
+            V(X, t_initial) + V(X_prime, t_initial) - V_min
         );
 
-        Z[indexTotal] *= exp(phase); // * ({abs_boundary_x_theta});
-    }}
-
-    __global__ void bloch_expV_boundary(cuda_complex *Z, double dbeta)
-    {{
-        const size_t i = P_gridDIM / 2;
-        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
-        const size_t indexTotal = j + i * X_gridDIM;
-
-        const double X = dX * (j - 0.5 * X_gridDIM);
-        const double Theta = dTheta * i;
-
-        const double phase = -0.25 * dbeta * (
-            V(X - 0.5 * Theta, t_initial) + V(X + 0.5 * Theta, t_initial) - V_min
-        );
-
-        Z[indexTotal] *= exp(phase); // * ({abs_boundary_x_theta});
+        rho[indexTotal] *= exp(phase); // * ({abs_boundary_x});
     }}
     """
 
-    fill_V_K = """
+    fill_V_K="""
     #include<math.h>
     #define _USE_MATH_DEFINES
 
     {cuda_consts}
-
-    // Potential energy
-    __device__ double V(double X, double t)
-    {{
-        return ({V});
-    }}
 
     // Kinetic energy
     __device__ double K(double P, double t)
@@ -377,70 +322,47 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         return ({K});
     }}
 
-    /////////////////////////////////////////////////////////////////////////////
-    //
-    // set Z = V( X - 0.5 * Theta, t_initial) + V( X + 0.5 * Theta, t_initial)
-    //
-    /////////////////////////////////////////////////////////////////////////////
+    // Potential energy
+    __device__ double V(double X, double t)
+    {{
+        return ({V});
+    }}
 
-    __global__ void fill_V_bulk(double *Z)
+    ////////////////////////////////////////////////////////////////////////////
+    //
+    //  set Z = V(X, t_initial) + V(X_prime, t_initial)
+    //
+    ////////////////////////////////////////////////////////////////////////////
+
+    __global__ void fill_V(double *Z)
     {{
         const size_t i = blockIdx.y;
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
         const double X = dX * (j - 0.5 * X_gridDIM);
-        const double Theta = dTheta * i;
+        const double X_prime = dX * (i - 0.5 * X_gridDIM);
 
-        const double X_minus = X - 0.5 * Theta;
-        const double X_plus = X + 0.5 * Theta;
-
-        Z[indexTotal] = V(X_minus, t_initial) + V(X_plus, t_initial);
+        Z[indexTotal] = V(X, t_initial) + V(X_prime, t_initial);
     }}
 
-    __global__ void fill_V_boundary(double *Z)
-    {{
-        const size_t i = P_gridDIM / 2;
-        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
-        const size_t indexTotal = j + i * X_gridDIM;
-
-        const double X = dX * (j - 0.5 * X_gridDIM);
-        const double Theta = dTheta * i;
-
-        const double X_minus = X - 0.5 * Theta;
-        const double X_plus = X + 0.5 * Theta;
-
-        Z[indexTotal] = V(X_minus, t_initial) + V(X_plus, t_initial);
-    }}
-
-    /////////////////////////////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////
     //
-    // set Z = K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial)
+    //  set Z = K(P, t_initial) + K(P_prime, t_initial)
     //
-    /////////////////////////////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////
 
-    __global__ void fill_K_bulk(double *Z)
+    __global__ void fill_K(double *Z)
     {{
         const size_t i = blockIdx.y;
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
-        const size_t indexTotal = j  + i * (X_gridDIM / 2 + 1);
+        const size_t indexTotal = j + i * X_gridDIM;
 
-        const double Lambda = dLambda * j;
-        const double P = dP * (i - 0.5 * P_gridDIM);
+        // fft shifting momentum
+        const double P = dP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
+        const double P_prime = dP * ((i + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
 
-        Z[indexTotal] = K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial);
-    }}
-
-    __global__ void fill_K_boundary(double *Z)
-    {{
-        const size_t i = threadIdx.x + blockDim.x * blockIdx.x;
-        const size_t j = X_gridDIM / 2;
-        const size_t indexTotal = j  + i * (X_gridDIM / 2 + 1);
-
-        const double Lambda = dLambda * j;
-        const double P = dP * (i - 0.5 * P_gridDIM);
-
-        Z[indexTotal] = K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial);
+        Z[indexTotal] *= K(P, t_initial) + K(P_prime, t_initial);
     }}
     """
 
@@ -452,7 +374,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
 
 if __name__ == '__main__':
 
-    print(WignerBlochCUDA1D.__doc__)
+    print(RhoBlochCUDA1D.__doc__)
 
     import matplotlib.pyplot as plt
 
@@ -460,13 +382,12 @@ if __name__ == '__main__':
     params = dict(
         t=0.,
         dt=0.01,
-        X_gridDIM=1024,
-        X_amplitude=10.,
-        P_gridDIM=512,
-        P_amplitude=10.,
+
+        X_gridDIM=512,
+        X_amplitude=20.,
 
         # Temperature of the initial state
-        kT=np.random.uniform(0.1, 1.),
+        kT=np.random.uniform(0.01, 1.),
 
         # randomized parameter
         omega=np.random.uniform(1., 2.),
@@ -478,27 +399,29 @@ if __name__ == '__main__':
         V="0.5 * omega * omega * X * X",
 
         # Hamiltonian
-        H=lambda self, x, p: 0.5*(p**2 + self.omega**2 * x**2),
+        H=lambda self: 0.5*(self.P_wigner**2 + self.omega**2 * self.X_wigner**2),
 
         # Exact analytical expression for the harmonic oscillator Gibbs state
-        get_exact_gibbs=lambda self: np.tanh(0.5 * self.omega / self.kT) / np.pi * np.exp(
-            -2. * np.tanh(0.5 * self.omega / self.kT) * self.H(self.X, self.P) / self.omega
+        get_exact_gibbs_wigner=lambda self: np.tanh(0.5 * self.omega / self.kT) / np.pi * np.exp(
+            -2. * np.tanh(0.5 * self.omega / self.kT) * self.H() / self.omega
         )
     )
 
     print("Calculating the Gibbs state...")
-    gibbs_state = WignerBlochCUDA1D(**params).get_gibbs_state()
+    quant_sys = RhoBlochCUDA1D(**params)
+    quant_sys.get_gibbs_state()
+
+    # Save the gibbs state Wigner function
+    W_gibbs_state = quant_sys.get_wignerfunction().get().real
 
     print("Check that the obtained Gibbs state is stationary under the Wigner-Moyal propagation...")
-    propagator = WignerMoyalCUDA1D(**params)
-    final_state = propagator.set_wignerfunction(gibbs_state).propagate(3000).get()
+    quant_sys.propagate(3000)
+    W_final_state = quant_sys.get_wignerfunction().get().real
 
-    gibbs_state = gibbs_state.get()
-
-    exact_gibbs = propagator.get_exact_gibbs()
+    W_exact_gibbs = quant_sys.get_exact_gibbs_wigner()
     print(
         "\nIninity norm between analytical and numerical Gibbs states = %.2e ." %
-        (np.linalg.norm(exact_gibbs.reshape(-1) - gibbs_state.reshape(-1), np.inf) * propagator.dX * propagator.dP)
+        (np.linalg.norm(W_exact_gibbs.reshape(-1) - W_gibbs_state.reshape(-1), np.inf) * quant_sys.wigner_dxdp)
     )
 
     ##########################################################################################
@@ -512,15 +435,19 @@ if __name__ == '__main__':
     # save common plotting parameters
     plot_params = dict(
         origin='lower',
-        extent=[propagator.X.min(), propagator.X.max(), propagator.P.min(), propagator.P.max()],
+        extent=[
+            quant_sys.X_wigner.min(), quant_sys.X_wigner.max(),
+            quant_sys.P_wigner.min(), quant_sys.P_wigner.max()
+        ],
         cmap='seismic',
         # make a logarithmic color plot (see, e.g., http://matplotlib.org/users/colormapnorms.html)
-        norm=WignerSymLogNorm(linthresh=1e-14, vmin=-0.01, vmax=0.1)
+        norm=WignerSymLogNorm(linthresh=1e-14, vmin=-0.01, vmax=0.1),
+        aspect=0.5,
     )
     plt.subplot(131)
 
     plt.title("The Gibbs state (initial state)")
-    plt.imshow(gibbs_state, **plot_params)
+    plt.imshow(W_gibbs_state, **plot_params)
     plt.colorbar()
     plt.xlabel('$x$ (a.u.)')
     plt.ylabel('$p$ (a.u.)')
@@ -528,7 +455,7 @@ if __name__ == '__main__':
     plt.subplot(132)
 
     plt.title("The exact Gibbs state")
-    plt.imshow(exact_gibbs, **plot_params)
+    plt.imshow(W_exact_gibbs, **plot_params)
     plt.colorbar()
     plt.xlabel('$x$ (a.u.)')
     plt.ylabel('$p$ (a.u.)')
@@ -536,7 +463,7 @@ if __name__ == '__main__':
     plt.subplot(133)
 
     plt.title("The Gibbs state after propagation")
-    plt.imshow(final_state, **plot_params)
+    plt.imshow(W_final_state, **plot_params)
     plt.colorbar()
     plt.xlabel('$x$ (a.u.)')
     plt.ylabel('$p$ (a.u.)')
