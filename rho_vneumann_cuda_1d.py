@@ -459,10 +459,9 @@ class RhoVNeumannCUDA1D:
 
     def get_wignerfunction(self):
         """
-        Return the Wigner function
-        :return:
+        Return the Wigner function obtained via numercal transformation of the density matrix (self.rho)
+        :return: gpuarray
         """
-
         # Check whether phase for shearing compiled
         try:
             self.phase_shearX
@@ -851,10 +850,8 @@ if __name__ == '__main__':
 
                 # these functions are used for evaluating the Ehrenfest theorems
                 diff_K="P",
-                #diff_V="omega_square * X"
+                diff_V="omega_square * X"
             )
-
-            print "p0 = ", self.quant_sys.p0
 
             # set randomised initial condition
             self.quant_sys.set_rho(
@@ -878,7 +875,7 @@ if __name__ == '__main__':
             :param frame_num: current frame number
             :return: image objects
             """
-            self.img.set_array(self.quant_sys.get_wignerfunction().real)
+            self.img.set_array(self.quant_sys.get_wignerfunction().get().real)
 
             self.quant_sys.propagate(50)
 
