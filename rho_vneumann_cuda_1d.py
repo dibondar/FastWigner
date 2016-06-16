@@ -98,6 +98,12 @@ class RhoVNeumannCUDA1D:
         self.P = np.fft.fftfreq(self.X_gridDIM, self.dX / (2 * np.pi))
         self.dP = self.P[1] - self.P[0]
 
+        # Girds for the Wigner function that you gte via sdlf.get_wignerfunction()
+        self.P_wigner = self.P / np.sqrt(2.)
+        self.X_wigner = self.X / np.sqrt(2.)
+
+        self.wigner_dxdp = (self.X_wigner[1] - self.X_wigner[0]) * (self.P_wigner[1] - self.P_wigner[0])
+
         ##########################################################################################
         #
         # Save CUDA constants
@@ -210,9 +216,6 @@ class RhoVNeumannCUDA1D:
         # the density matrix (central object) in the coordinate representation
         self.rho = gpuarray.GPUArray((self.X.size, self.X.size), np.complex128)
 
-        # the density matrix in the momentum representation
-        self.rho_p = gpuarray.empty_like(self.rho)
-
         ##########################################################################################
         #
         #   Initialize facility for calculating expectation values of the curent density matrix
@@ -226,7 +229,8 @@ class RhoVNeumannCUDA1D:
         # hash table of cuda compiled functions that calculate an average of specified observable
         self._compiled_observable = dict()
 
-        # Create the plan for FFT/iFFT for axis 1
+        # Create the plan for FFT/iFFT
+        self.plan_Z2Z_ax0 = cufft.Plan_Z2Z_2D_Axis0(self.rho.shape)
         self.plan_Z2Z_ax1 = cufft.Plan_Z2Z_2D_Axis1(self.rho.shape)
 
         ##########################################################################################
@@ -277,14 +281,14 @@ class RhoVNeumannCUDA1D:
         The x -> p transform
         :return:
         """
-        cufft.fft_Z2Z(self.rho, self.rho_p, self.plan_Z2Z)
+        cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z)
 
     def p2x_transform(self):
         """
         The p -> x transform
         :return:
         """
-        cufft.ifft_Z2Z(self.rho_p, self.rho, self.plan_Z2Z)
+        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z)
 
     def set_rho(self, new_rho):
         """
@@ -333,7 +337,7 @@ class RhoVNeumannCUDA1D:
         self.expV(self.rho, self.t, **self.rho_mapper_params)
 
         self.x2p_transform()
-        self.expK(self.rho_p, self.t, **self.rho_mapper_params)
+        self.expK(self.rho, self.t, **self.rho_mapper_params)
         self.p2x_transform()
 
         self.expV(self.rho, self.t, **self.rho_mapper_params)
@@ -440,18 +444,106 @@ class RhoVNeumannCUDA1D:
                     self.get_observable(obs_str)(self._tmp, self.t, **self.rho_mapper_params)
                 else:
                     # Going to the momentum representation
-                    cufft.fft_Z2Z(self._tmp, self.rho_p, self.plan_Z2Z_ax1)
+                    cufft.fft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
 
                     # Normalize
-                    self.rho_p /= self.rho_p.shape[1]
+                    self._tmp /= self._tmp.shape[1]
 
                     # Apply observable in the momentum representation
-                    self.get_observable(obs_str)(self.rho_p, self.t, **self.rho_mapper_params)
+                    self.get_observable(obs_str)(self._tmp, self.t, **self.rho_mapper_params)
 
                     # Going back to the coordinate representation
-                    cufft.ifft_Z2Z(self.rho_p, self._tmp, self.plan_Z2Z_ax1)
+                    cufft.ifft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
 
         return cu_linalg.trace(self._tmp).real * self.dX
+
+    def get_wignerfunction(self):
+        """
+        Return the Wigner function
+        :return:
+        """
+
+        # Check whether phase for shearing compiled
+        try:
+            self.phase_shearX
+        except AttributeError:
+            # Compile the functions
+            wigner_util_compiled = SourceModule(
+                self.wigner_util_cuda_source.format(cuda_consts=self.cuda_consts)
+            )
+            self.phase_shearX = wigner_util_compiled.get_function("phase_shearX")
+            self.phase_shearY = wigner_util_compiled.get_function("phase_shearY")
+            self.sign_flip = wigner_util_compiled.get_function("sign_flip")
+
+        """
+            ####################################################################
+            #
+            # The documented pice of code is to test the the numerical Wigner transform
+            # is equivalent to the denisty matrix
+            #
+            ####################################################################
+
+            self._tmp1 = gpuarray.empty_like(self._tmp)
+            self.av_P_wigner = SourceModule(
+                self.weighted_func_cuda_code.format(cuda_consts=self.cuda_consts, func="X * P")
+            ).get_function("Kernel")
+
+        rho_obs = 0.5 * (
+            self.get_average(("X","P")) + self.get_average((None,"P", "X"))
+        )
+        """
+
+        ###############################################################
+        #
+        # Step 1: Perform the 45 degree rotation of the density matrix
+        #
+        ###############################################################
+
+        # Shear X
+        cufft.fft_Z2Z(self.rho, self._tmp, self.plan_Z2Z_ax1)
+        self.phase_shearX(self._tmp, **self.rho_mapper_params)
+        cufft.ifft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
+        self._tmp /= self._tmp.shape[1]
+
+        # Shear Y
+        cufft.fft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax0)
+        self.phase_shearY(self._tmp, **self.rho_mapper_params)
+        cufft.ifft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax0)
+        self._tmp /= self._tmp.shape[0]
+
+        # Shear X
+        cufft.fft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
+        self.phase_shearX(self._tmp, **self.rho_mapper_params)
+        cufft.ifft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
+        self._tmp /= self._tmp.shape[1]
+
+        ###############################################################
+        #
+        # Step 2: Perform the FFT over the roated matrix
+        #
+        ###############################################################
+
+        self.sign_flip(self._tmp, **self.rho_mapper_params)
+        cufft.ifft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax0)
+        self.sign_flip(self._tmp, **self.rho_mapper_params)
+
+        # normalize the wigner function
+        self._tmp /= gpuarray.sum(self._tmp).get() * self.wigner_dxdp
+
+        """
+        ####################################################################
+        #
+        # The documented pice of code is to test the the numerical Wigner transform
+        # is equivalent to the denisty matrix
+        #
+        ####################################################################
+        self.av_P_wigner(self._tmp, self._tmp1, self.t, **self.rho_mapper_params)
+        r = float(gpuarray.sum(self._tmp1).get().real * self.wigner_dxdp)
+        print "diff between density matrix and wigner = %.3e (abs val of obs = %.3e)"% (r - rho_obs, r)
+        """
+
+        return self._tmp
+
 
     expK_expV_cuda_source = """
     #include<pycuda-complex.hpp>
@@ -569,6 +661,98 @@ class RhoVNeumannCUDA1D:
     }}
     """
 
+    wigner_util_cuda_source = """
+    #include<pycuda-complex.hpp>
+    #include<math.h>
+    #define _USE_MATH_DEFINES
+
+    typedef pycuda::complex<double> cuda_complex;
+
+    {cuda_consts}
+
+    ////////////////////////////////////////////////////////////////////////////
+    //
+    // CUDA code to apply phase factors to perform X and Y shearing
+    //
+    ////////////////////////////////////////////////////////////////////////////
+
+    __global__ void phase_shearX(cuda_complex *rho)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        const double P = dP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
+        const double X_prime = dX * (i - 0.5 * X_gridDIM);
+
+        // perform rotation by theta: const double a = tan(0.5 * theta);
+        const double a = tan(M_PI / 8.);
+        const double phase = -a * P * X_prime;
+
+        rho[indexTotal] *= cuda_complex(cos(phase), sin(phase));
+    }}
+
+    __global__ void phase_shearY(cuda_complex *rho)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        const double X = dX * (j - 0.5 * X_gridDIM);
+        const double P_prime = dP * ((i + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
+
+        // perform rotation by theta: const double b = -sin(theta);
+        const double b = -sin(M_PI / 4.);
+        const double phase = -b * P_prime * X;
+
+        rho[indexTotal] *= cuda_complex(cos(phase), sin(phase));
+    }}
+
+    ////////////////////////////////////////////////////////////////////////////
+    //
+    // CUDA code to multiply with (-1)^i in order for FFT
+    // to approximate the Fourier integral over theta
+    //
+    ////////////////////////////////////////////////////////////////////////////
+
+    __global__ void sign_flip(cuda_complex *rho)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        // rho *= pow(-1, i)
+        rho[indexTotal] *= 1 - 2 * int(i % 2);
+    }}
+    """
+
+    weighted_func_cuda_code = """
+    // CUDA code to calculate
+    //      weighted = W(X, P, t) * func(X, P, t).
+    // This is used in self.get_average
+    // weighted.sum()*dX*dP is the average of func(X, P, t) over the Wigner function
+
+    #include<pycuda-complex.hpp>
+    #include<math.h>
+    #define _USE_MATH_DEFINES
+
+    typedef pycuda::complex<double> cuda_complex;
+
+    {cuda_consts}
+
+    __global__ void Kernel(const cuda_complex *W, cuda_complex *weighted, double t)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        const double X = dX * (j - 0.5 * X_gridDIM) / sqrt(2.);
+        const double P = dP * (i - 0.5 * X_gridDIM) / sqrt(2.);
+
+        weighted[indexTotal] = W[indexTotal] * ({func});
+    }}
+    """
+
 ##########################################################################################
 #
 # Example
@@ -589,6 +773,8 @@ if __name__ == '__main__':
 
     import matplotlib.animation
     import matplotlib.pyplot as plt
+
+    #np.random.seed(3156)
 
     class VisualizeDynamicsPhaseSpace:
         """
@@ -613,7 +799,10 @@ if __name__ == '__main__':
             ax = fig.add_subplot(111)
 
             ax.set_title('Wigner function, $W(x,p,t)$')
-            extent = [self.quant_sys.X.min(), self.quant_sys.X.max(), self.quant_sys.X.min(), self.quant_sys.X.max()]
+            extent = [
+                self.quant_sys.X_wigner.min(), self.quant_sys.X_wigner.max(),
+                self.quant_sys.P_wigner.min(), self.quant_sys.P_wigner.max()
+            ]
 
             # import utility to visualize the wigner function
             from wigner_normalize import WignerNormalize
@@ -622,6 +811,7 @@ if __name__ == '__main__':
             self.img = ax.imshow(
                 [[]],
                 extent=extent,
+                aspect=0.5,
                 origin='lower',
                 cmap='seismic',
                 norm=WignerNormalize(vmin=-0.01, vmax=0.1)
@@ -642,8 +832,8 @@ if __name__ == '__main__':
             self.quant_sys = RhoVNeumannCUDA1D(
                 t=0.,
                 dt=0.01,
-                X_gridDIM=1024,
-                X_amplitude=10.,
+                X_gridDIM=512,
+                X_amplitude=20.,
 
                 # randomized parameter
                 omega_square=np.random.uniform(2., 6.),
@@ -661,13 +851,15 @@ if __name__ == '__main__':
 
                 # these functions are used for evaluating the Ehrenfest theorems
                 diff_K="P",
-                diff_V="omega_square * X"
+                #diff_V="omega_square * X"
             )
+
+            print "p0 = ", self.quant_sys.p0
 
             # set randomised initial condition
             self.quant_sys.set_rho(
                 "exp("
-                "   -sigma *( pow(X - x0, 2) + pow(X_prime - x0, 2) ) "
+                "   -sigma *( pow(X - x0, 2) + pow(X_prime - x0, 2)) + cuda_complex(0., p0*(X - X_prime))"
                 ")"
             )
 
@@ -686,8 +878,9 @@ if __name__ == '__main__':
             :param frame_num: current frame number
             :return: image objects
             """
-            # propagate the wigner function
-            self.img.set_array(np.abs(self.quant_sys.propagate(50).get()))
+            self.img.set_array(self.quant_sys.get_wignerfunction().real)
+
+            self.quant_sys.propagate(50)
 
             return self.img,
 
