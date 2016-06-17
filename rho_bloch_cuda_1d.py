@@ -60,7 +60,6 @@ class RhoBlochCUDA1D(RhoVNeumannCUDA1D):
         bloch_expK_expV_compiled = SourceModule(
             self.bloch_expK_expV_cuda_source.format(
                 cuda_consts=self.cuda_consts, K=self.K, V=self.V,
-                abs_boundary_p=self.abs_boundary_p, abs_boundary_x=self.abs_boundary_x
             )
         )
 
@@ -283,7 +282,7 @@ class RhoBlochCUDA1D(RhoVNeumannCUDA1D):
             K(P, t_initial) + K(P_prime, t_initial) - K_min
         );
 
-        rho[indexTotal] *= exp(phase); // * ({abs_boundary_p});
+        rho[indexTotal] *= exp(phase);
     }}
 
     ////////////////////////////////////////////////////////////////////////////
@@ -306,7 +305,7 @@ class RhoBlochCUDA1D(RhoVNeumannCUDA1D):
             V(X, t_initial) + V(X_prime, t_initial) - V_min
         );
 
-        rho[indexTotal] *= exp(phase); // * ({abs_boundary_x});
+        rho[indexTotal] *= exp(phase);
     }}
     """
 
