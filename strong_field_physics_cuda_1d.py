@@ -23,12 +23,12 @@ import matplotlib.pyplot as plt
 ##########################################################################################
 sys_params = dict(
     t=0.,
-    dt=0.005,
+    dt=0.01,
 
     X_gridDIM=2*1024,
 
     # the lattice constant is 2 * X_amplitude
-    X_amplitude=200.,
+    X_amplitude=150.,
 
     # Temperature in atomic units
     #kT=0.001,
@@ -41,7 +41,10 @@ sys_params = dict(
     omega=0.05698,
 
     # field strength
-    F=0.07,
+    F=0.04,
+
+    # ionization potential
+    Ip=0.59,
 
     functions="""
     // # The laser field (the field will be on for 7 periods of laser field)
@@ -54,7 +57,7 @@ sys_params = dict(
     abs_boundary_x="pow("
                    "    abs(sin(0.5 * M_PI * (X + X_amplitude) / X_amplitude)"
                    "    * sin(0.5 * M_PI * (X_prime + X_amplitude) / X_amplitude))"
-                   ", dt * 0.04)",
+                   ", dt * 0.05)",
 
     # The same as C code
     E=lambda self, t: -self.F * np.sin(self.omega * t) * np.sin(self.omega * t / 16.)**2,
@@ -180,7 +183,7 @@ class VisualizeDynamicsPhaseSpace:
         self.T_final = 8 * 2 * np.pi / self.quant_sys.omega
 
         # Number of steps before plotting
-        self.num_iteration = 200
+        self.num_iteration = 100
 
         # Number of frames
         self.num_frames = int(np.ceil(self.T_final / self.quant_sys.dt / self.num_iteration))
@@ -192,6 +195,12 @@ class VisualizeDynamicsPhaseSpace:
 
         # set the Gibbs state as initial condition
         self.quant_sys.get_ground_state(abs_tol_purity=1e-11)
+
+        # save the initial wigner function
+        r = self.quant_sys.get_wignerfunction()
+        self.quant_sys.wigner_initial = r.real
+
+        assert r is not self.quant_sys.wigner_initial
 
         print("Purity: 1 - %.1e" % (1 - self.quant_sys.get_purity()))
 
@@ -218,7 +227,7 @@ class VisualizeDynamicsPhaseSpace:
         frame_grp = self.frames_grp.create_group(str(self.current_frame_num))
 
         # Get the Wigner function
-        wigner = self.quant_sys.get_wignerfunction().get().real
+        wigner = self.quant_sys.wigner_current.get().real
         self.img.set_array(wigner)
 
         frame_grp["wigner"] = wigner
@@ -243,7 +252,8 @@ with h5py.File('strong_field_physics.hdf5', 'w') as file_results:
     fig = plt.gcf()
     visualizer = VisualizeDynamicsPhaseSpace(fig, sys_params, file_results)
     animation = matplotlib.animation.FuncAnimation(
-        fig, visualizer, frames=881, init_func=visualizer.empty_frame, blit=True, repeat=True
+        fig, visualizer, frames=min(881, visualizer.num_frames),
+        init_func=visualizer.empty_frame, blit=True, repeat=True
     )
 
     #plt.show()
@@ -294,6 +304,7 @@ with h5py.File('strong_field_physics.hdf5', 'w') as file_results:
 
     plt.show()
 
+    """
     #################################################################
     #
     # Plot HHG spectra as FFT(<P>)
@@ -311,7 +322,7 @@ with h5py.File('strong_field_physics.hdf5', 'w') as file_results:
     # obtain the dipole
     J = np.array(quant_sys.P_average)
 
-    fft_J = fftpack.fft(blackman(N) * J * (-1)**np.arange(J.size))
+    fft_J = fftpack.fft(blackman(N) * J)
     #fft_J = fftpack.fft(J)
     spectrum = np.abs(fftpack.fftshift(fft_J))**2
     omegas = fftpack.fftshift(fftpack.fftfreq(N, quant_sys.dt/(2*np.pi))) / quant_sys.omega
@@ -326,6 +337,7 @@ with h5py.File('strong_field_physics.hdf5', 'w') as file_results:
     plt.ylim([1e-20, 1.])
 
     plt.show()
+    """
 
     #################################################################
     #
@@ -339,3 +351,4 @@ with h5py.File('strong_field_physics.hdf5', 'w') as file_results:
     ehrenfest_grp["X_average_RHS"] = quant_sys.X_average_RHS
     ehrenfest_grp["P_average_RHS"] = quant_sys.P_average_RHS
     ehrenfest_grp["hamiltonian_average"] = quant_sys.hamiltonian_average
+    ehrenfest_grp["wigner_time"] = quant_sys.wigner_time

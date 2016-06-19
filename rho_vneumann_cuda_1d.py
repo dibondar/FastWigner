@@ -1,6 +1,8 @@
 import pycuda.gpuarray as gpuarray
 import pycuda.autoinit
 from pycuda.compiler import SourceModule
+from pycuda.tools import dtype_to_ctype
+from pycuda.reduction import ReductionKernel
 import numpy as np
 from fractions import gcd
 from types import MethodType, FunctionType
@@ -258,6 +260,9 @@ class RhoVNeumannCUDA1D:
             # List where the expectation value of the Hamiltonian will be calculated
             self.hamiltonian_average = []
 
+            # List for saving phase space time integral
+            self.wigner_time = []
+
             # Flag requesting tha the Ehrenfest theorem calculations
             self.isEhrenfest = True
 
@@ -400,6 +405,12 @@ class RhoVNeumannCUDA1D:
                 self.get_average((None, self.K)) + self.get_average((self.V,))
             )
 
+            # save Wigner time
+            self.wigner_current = self.get_wignerfunction()
+            self.wigner_time.append(
+                self.get_wigner_time(self.wigner_current, self.wigner_initial, self.t)
+            )
+
     def get_observable(self, observable_str):
         """
         Return the compiled observable
@@ -469,9 +480,6 @@ class RhoVNeumannCUDA1D:
         try:
             purity_kernel = self._purity_kernel
         except AttributeError:
-            from pycuda.tools import dtype_to_ctype
-            from pycuda.reduction import ReductionKernel
-
             purity_kernel = self._purity_kernel = ReductionKernel(
                 np.float64, neutral="0", reduce_expr="a + b",
                 map_expr="pow(abs(R[i]), 2)", arguments="const %s *R" % dtype_to_ctype(self.rho.dtype)
@@ -583,6 +591,33 @@ class RhoVNeumannCUDA1D:
 
         return self._tmp
 
+    def get_wigner_time(self, wigner_current, wigner_init, t):
+        """
+        Calculate the integral:
+
+            int_{H(x, p, t) > -Ip} [wigner_current(x,p) - wigner_init(x,p)] dxdp
+
+        :param wigner_current: gpuarray containing current Wigner function
+        :param wigner_init: gpuarray containing initial Wigner function
+        :param t: current time
+        :return: float
+        """
+        # If kernel calculating the wigner time is not present, compile it
+        try:
+            wigner_time_mapper = self._wigner_time_mapper
+        except AttributeError:
+            # Allocate memory to map
+            self._tmp_wigner_time = gpuarray.empty(self.rho.shape, np.float64)
+
+            wigner_time_mapper = self._wigner_time_mapper = SourceModule(
+                self.wigner_time_mapper_cuda_code.format(
+                    cuda_consts=self.cuda_consts, K=self.K, V=self.V
+                ),
+            ).get_function("Kernel")
+
+        wigner_time_mapper(self._tmp_wigner_time, wigner_current, wigner_init, t, **self.rho_mapper_params)
+
+        return gpuarray.sum(self._tmp_wigner_time).get() * self.wigner_dxdp
 
     expK_expV_cuda_source = """
     #include<pycuda-complex.hpp>
@@ -789,6 +824,36 @@ class RhoVNeumannCUDA1D:
         const double P = dP * (i - 0.5 * X_gridDIM) / sqrt(2.);
 
         weighted[indexTotal] = W[indexTotal] * ({func});
+    }}
+    """
+
+    wigner_time_mapper_cuda_code = """
+    // CUDA code to calculate
+    //      out = Heaviside(H(x, p, t) > -Ip) * (wigner_current(x,p) - wigner_init(x,p))
+
+    #include<pycuda-complex.hpp>
+    #include<math.h>
+    #define _USE_MATH_DEFINES
+
+    typedef pycuda::complex<double> cuda_complex;
+
+    {cuda_consts}
+
+    __global__ void Kernel(double *out, const cuda_complex *wigner_current, const double *wigner_init, double t)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        const double X = dX * (j - 0.5 * X_gridDIM) / sqrt(2.);
+        const double P = dP * (i - 0.5 * X_gridDIM) / sqrt(2.);
+
+        const double hamiltonian = {K} + {V};
+
+        // Heaviside function of H(x, p, t) > -Ip
+        const double indicator_func = 0.5 * (1 + int(signbit(hamiltonian + Ip)));
+
+        out[indexTotal] = indicator_func * (real(wigner_current[indexTotal]) - wigner_init[indexTotal]);
     }}
     """
 

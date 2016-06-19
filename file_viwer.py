@@ -45,6 +45,14 @@ class VisualizeDynamicsPhaseSpace:
         # Convert into object
         self.quant_sys = type('', (object,), self.quant_sys)()
 
+        # Add laser field method (it is not a nice style but for it will do for a time being)
+        from types import MethodType
+
+        self.quant_sys.E = MethodType(
+            lambda self, t: -self.F * np.sin(self.omega * t) * np.sin(self.omega * t / 16.) ** 2,
+            self.quant_sys, self.quant_sys.__class__
+        )
+
         # final propagation time
         self.T_final = 8 * 2 * np.pi / self.quant_sys.omega
 
@@ -67,7 +75,9 @@ class VisualizeDynamicsPhaseSpace:
         #
         #################################################################
 
-        ax = fig.add_subplot(211)
+        fig.set_size_inches(9, 9)
+        fig.set_dpi(200)
+        ax = fig.add_subplot(311)
 
         #ax.set_title(
         #    'Wigner function evolution $W(x,p,t)$\nwith $\\gamma^{-1} = $ %.2f and $kT = $ %.2f (a.u.)'
@@ -88,7 +98,7 @@ class VisualizeDynamicsPhaseSpace:
             [[]],
             extent=extent,
             origin='lower',
-            aspect=5,
+            aspect=2,
             cmap='bwr',
             #norm=WignerSymLogNorm(linthresh=1e-4, vmin=-0.3, vmax=0.3),
             norm=WignerNormalize(vmin=-0.0001, vmax=0.0001)
@@ -97,24 +107,29 @@ class VisualizeDynamicsPhaseSpace:
         ax.set_xlim([-25, 25])
         ax.set_ylim([-3, 3])
 
-        self.fig.colorbar(self.img)
+        #self.fig.colorbar(self.img)
 
         ax.set_xlabel('$x$ (a.u.)')
         ax.set_ylabel('$p$ (a.u.)')
 
-        ax = fig.add_subplot(212)
+        ax = fig.add_subplot(312)
 
         self.X = self.quant_sys.X_wigner.reshape(-1)
         self.X_rho = np.sqrt(2.) * self.X
         self.wigner_dP = self.quant_sys.P_wigner[1] - self.quant_sys.P_wigner[0]
 
-        self.line1, = ax.semilogy([self.X_rho.min(), self.X_rho.max()], [1e-14, 1.], 'r', label="Rho")
-        self.line2, = ax.semilogy([self.X_rho.min(), self.X_rho.max()], [1e-14, 1.], 'b-', label="W")
+        self.line1, = ax.semilogy([self.X.min(), self.X.max()], [1e-12, 1.], 'r', label="Rho")
+        #self.line2, = ax.semilogy([self.X.min(), self.X.max()], [1e-12, 1.], 'b-', label="W")
         #self.fig.legend(ax)
-        #F = self.quant_sys.F
-        #self.laser_filed_plot, = ax.plot([0., self.T_final], [-F, F])
-        #ax.set_xlabel('time (a.u.)')
-        #ax.set_ylabel('Laser field $E(t)$ (a.u.)')
+        ax.set_xlabel('x (a.u.)')
+        ax.set_ylabel('Probability density, $|\Psi(x,t)|^2$')
+
+        ax = fig.add_subplot(313)
+
+        F = self.quant_sys.F
+        self.laser_filed_plot, = ax.plot([0., self.T_final], [-F, F])
+        ax.set_xlabel('time (a.u.)')
+        ax.set_ylabel('Laser field, $E(t)$ (a.u.)')
 
     def empty_frame(self):
         """
@@ -123,10 +138,10 @@ class VisualizeDynamicsPhaseSpace:
         :return: image object
         """
         self.img.set_array([[]])
-        #self.laser_filed_plot.set_data([], [])
+        self.laser_filed_plot.set_data([], [])
         self.line1.set_data([], [])
-        self.line2.set_data([], [])
-        return self.img, self.line1, self.line2 #self.laser_filed_plot
+        #self.line2.set_data([], [])
+        return self.img, self.laser_filed_plot, self.line1, #self.line2 #self.laser_filed_plot
 
     def __call__(self, frame_num):
         """
@@ -141,42 +156,37 @@ class VisualizeDynamicsPhaseSpace:
         wigner = frame_grp["wigner"][...]
         self.img.set_array(wigner)
 
-        wigner_x_marginal = wigner.sum(axis=0) * self.wigner_dP
-        self.line2.set_data(self.X, wigner_x_marginal)
+        #wigner_x_marginal = wigner.sum(axis=0) * self.wigner_dP
+        #self.line2.set_data(self.X, wigner_x_marginal)
 
         prob = frame_grp["prob"][...]
         self.line1.set_data(self.X_rho, prob.real)
-        #self.laser_filed_plot.set_data( self.quant_sys.X_wigner, prob.real)
 
-        #print("Purity: 1 - %.1e" % (1 - self.quant_sys.get_purity()))
+        self.times.append(frame_grp["t"][...])
 
-        #print("Frame : %d / %d" % (self.current_frame_num, self.num_frames))
-        #self.current_frame_num += 1
-
-        #self.times.append(self.quant_sys.t)
-
-        #t = np.array(self.times)
-        #self.laser_filed_plot.set_data(t, self.quant_sys.E(t))
+        t = np.array(self.times)
+        self.laser_filed_plot.set_data(t, self.quant_sys.E(t))
 
         #self.fig.save_figure("result.png")
 
-        return self.img, self.line1, self.line2 #self.laser_filed_plot
+        return self.img, self.laser_filed_plot, self.line1, #self.line2 #self.laser_filed_plot
 
-with h5py.File('../strong_field_physics_1024.hdf5', 'r') as file_results:
+with h5py.File('../results/strong_field_physics_1024_long_run.hdf5', 'r') as file_results:
     fig = plt.gcf()
     visualizer = VisualizeDynamicsPhaseSpace(fig, file_results)
-    animation = matplotlib.animation.FuncAnimation(
-        fig, visualizer, frames=visualizer.num_frames, init_func=visualizer.empty_frame, blit=True, repeat=True
-    )
+    #animation = matplotlib.animation.FuncAnimation(
+    #    fig, visualizer, frames=882, init_func=visualizer.empty_frame, blit=True, repeat=True
+    #)
+    # visualizer.num_frames
 
     #plt.show()
 
     # Set up formatting for the movie files
-    writer = matplotlib.animation.ImageMagickFileWriter()
+    #writer = matplotlib.animation.ImageMagickFileWriter()
     #writer = matplotlib.animation.writers['mencoder'](fps=20, metadata=dict(artist='Denys Bondar'), bitrate=-1)
 
     # Save animation into the file
-    animation.save('wigner', writer=writer)
+    #animation.save('wigner', writer=writer)
 
     # extract the reference to quantum system
     quant_sys = visualizer.quant_sys
@@ -246,5 +256,23 @@ with h5py.File('../strong_field_physics_1024.hdf5', 'r') as file_results:
     plt.xlabel('frequency / $\\omega$')
     plt.xlim([0, 100.])
     plt.ylim([1e-20, 1.])
+
+    plt.show()
+
+    #################################################################
+    #
+    # Plot Wigner time
+    #
+    #################################################################
+    wigner_time = quant_sys.wigner_time
+
+    #plt.subplot(211)
+    #plt.plot(times, wigner_time)
+    #plt.xlabel('time (a.u.)')
+
+    #plt.subplot(212)
+    plt.plot(times, np.cumsum(wigner_time) * quant_sys.dt)
+    plt.xlabel('$\\tau$ (a.u.)')
+    plt.ylabel('Time $T\\left( H(x,p, \\tau) > -I_p \\right)$')
 
     plt.show()
