@@ -181,19 +181,6 @@ class WignerMoyalCUDA1D:
         except AttributeError:
             self.abs_boundary_lambda_p = "1."
 
-        try:
-            self.abs_boundary_x_p
-
-            self.abs_boundary_x_p = SourceModule(
-                self.abs_boundary_x_p_cuda_code.format(
-                    abs_boundary_x_p=self.abs_boundary_x_p,
-                    cuda_consts=self.cuda_consts
-                )
-            ).get_function("Kernel")
-
-        except AttributeError:
-            self.abs_boundary_x_p = None
-
         ##########################################################################################
         #
         #   Define block and grid parameters for CUDA kernel
@@ -259,6 +246,20 @@ class WignerMoyalCUDA1D:
             self.cuda_consts += self.functions
         except AttributeError:
             pass
+
+        # Generate absorbing boundary in xp
+        try:
+            self.abs_boundary_x_p
+
+            self.abs_boundary_x_p = SourceModule(
+                self.abs_boundary_x_p_cuda_code.format(
+                    abs_boundary_x_p=self.abs_boundary_x_p,
+                    cuda_consts=self.cuda_consts
+                )
+            ).get_function("Kernel")
+
+        except AttributeError:
+            self.abs_boundary_x_p = None
 
         print("\n================================ Compiling expK and expV ================================\n")
 
