@@ -599,7 +599,7 @@ class WignerMoyalCUDA1D:
         const double P = dP * (i - 0.5 * P_gridDIM);
 
         const double phase = -dt*(
-            K(P + 0.5 * Lambda, t) - K(P - 0.5 * Lambda, t)
+            K(P + 0.5 * Lambda, t + 0.5 * dt) - K(P - 0.5 * Lambda, t + 0.5 * dt)
         );
 
         Z[indexTotal] *= cuda_complex(cos(phase), sin(phase)) * ({abs_boundary_lambda_p});
@@ -615,7 +615,7 @@ class WignerMoyalCUDA1D:
         const double P = dP * (i - 0.5 * P_gridDIM);
 
         const double phase = -dt*(
-            K(P + 0.5 * Lambda, t) - K(P - 0.5 * Lambda, t)
+            K(P + 0.5 * Lambda, t + 0.5 * dt) - K(P - 0.5 * Lambda, t + 0.5 * dt)
         );
 
         Z[indexTotal] *= cuda_complex(cos(phase), sin(phase)) * ({abs_boundary_lambda_p});
@@ -657,7 +657,7 @@ class WignerMoyalCUDA1D:
         const double X_minus = X - 0.5 * Theta;
         const double X_plus = X + 0.5 * Theta;
 
-        const double phase = -0.5 * dt * (V(X_minus, t) - V(X_plus, t));
+        const double phase = -0.5 * dt * (V(X_minus, t + 0.5 * dt) - V(X_plus, t + 0.5 * dt));
 
         Z[indexTotal] *= cuda_complex(cos(phase), sin(phase)) * ({abs_boundary_x_theta});
     }}
